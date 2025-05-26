@@ -1,0 +1,36 @@
+---
+
+- name: "Fetch the monitor keyring"
+  shell: ceph auth get mon. -o /tmp/ceph.mon.keyring
+
+- name: "Fetch the monitor map"
+  shell: ceph mon getmap -o /tmp/monmap
+
+- name: Set ownership properly on created files
+  file:
+    path: "{{ item }}"
+    owner: ceph
+  with_items:
+    - "/tmp/ceph.mon.keyring"
+    - "/tmp/monmap"
+
+- name: Create monitor data directory
+  file:
+    path: "/var/lib/ceph/mon/ceph-{{ inventory_hostname | split('.') | first }}"
+    owner: ceph
+    state: directory
+
+- name: Populate the monitor daemon with the monitor map and keyring
+  shell: ceph-mon --mkfs -i {{ inventory_hostname | split('.') | first }} --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
+  become_user: ceph
+
+- name: "Make sure we have the osd boostrap keyring"
+  import_tasks: "ceph-osd-bootstrap-keyring.yml"
+
+- name: cleanup
+  file:
+    path: "{{ item }}"
+    state: absent
+  with_items:
+    - "/tmp/monmap"
+    - "/tmp/ceph.mon.keyring"

@@ -1,0 +1,8 @@
+{% set host_list = [] %}
+{% for host in groups["ceph_" + ceph_cluster_name + "_mon"] %}
+{%   do host_list.append(host) %}
+{% endfor %}
+{% for host in groups["ceph_" + ceph_cluster_name + "_mds"]|default([]) %}
+{%   do host_list.append(host) %}
+{% endfor %}
+[ {{ host_list|unique|sort|join(",") }} ]

@@ -1,0 +1,145 @@
+---
+
+- name: "Check required variables"
+  fail:
+    msg: "Must specify ceph_cluster_name, ceph_public_network, ceph_cluster_network, and ceph_uuid"
+  when: ceph_cluster_name is not defined or ceph_public_network is not defined or ceph_cluster_network is not defined or ceph_uuid is not defined
+
+- name: "APT: Install required packages"
+  ansible.builtin.apt:
+    pkg:
+      - ceph
+    state: present
+
+- name: "Gather ceph hosts"
+  set_fact:
+    ceph_hosts_json: "{{ lookup('template', 'ceph_hosts.j2') }}"
+
+- name: "Parse ceph hosts"
+  set_fact:
+    ceph_hosts: "{{ ceph_hosts_json|from_yaml }}"
+
+- name: "Add known ceph nodes to /etc/hosts"
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ hostvars[item]['ceph_mon_ip'] }} {{ item|split('.')|first }} {{ item }}"
+  with_items: "{{ ceph_hosts | reject('search', inventory_hostname | split('.') | first ) }}"
+
+- name: Fixup ansible password for this playbook if it was changed in the base role
+  set_fact:
+    ansible_password: "{{ superuser_password }}"
+    ansible_become_pass: "{{ superuser_password }}"
+  delegate_to: "{{ item }}"
+  delegate_facts: True
+  no_log: true
+  when: ansible_user == superuser and ((superuser_created is defined and superuser_created.changed) or (superuser_pwchanged is defined and superuser_pwchanged.changed))
+  with_items: "{{ groups['ceph_' + ceph_cluster_name + '_mon']|unique|sort }}"
+
+- name: "Determine nodes which are initialized with Admin keyring"
+  stat:
+    path: /etc/ceph/ceph.client.admin.keyring
+  delegate_to: "{{ item }}"
+  ignore_unreachable: yes
+  failed_when: false
+  changed_when: false
+  register: ceph_nodes_adminkeyring
+  with_items: "{{ groups['ceph_' + ceph_cluster_name + '_mon']|unique|sort }}"
+
+- name: "Determine nodes which are initialized with OSD keyring"
+  stat:
+    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+  delegate_to: "{{ item }}"
+  ignore_unreachable: yes
+  failed_when: false
+  changed_when: false
+  register: ceph_nodes_osdkeyring
+  with_items: "{{ groups['ceph_' + ceph_cluster_name + '_mon']|unique|sort }}"
+
+- name: "Determine which node to use for boostrapping"
+  set_fact:
+    ceph_bootstrap_node: >-
+      {%- set eligible_adminkeyring_hosts = [] %}
+      {%- set eligible_osdkeyring_hosts = [] %}
+      {%- for node in ceph_nodes_adminkeyring.results %}
+      {%-   if node.stat.exists|default(false) %}
+      {%-     do eligible_adminkeyring_hosts.append(node.item) %}
+      {%-   endif %}
+      {%- endfor %}
+      {%- for node in ceph_nodes_osdkeyring.results %}
+      {%-   if node.stat.exists|default(false) %}
+      {%-     do eligible_osdkeyring_hosts.append(node.item) %}
+      {%-   endif %}
+      {%- endfor %}
+      {%- set eligible_hosts = eligible_adminkeyring_hosts | intersect(eligible_osdkeyring_hosts) | unique | sort %}
+      {%- if eligible_hosts | length == 0 %}
+      {%-   do eligible_hosts.append(groups['ceph_' + ceph_cluster_name + '_mon']|unique|sort|first) %}
+      {%- endif %}
+      {{- eligible_hosts[0] -}}
+
+- name: "See if we have the client admin keyring installed"
+  stat:
+    path: /etc/ceph/ceph.client.admin.keyring
+  register: admin_keyring
+
+- name: "See if we have the osd keyring installed"
+  stat:
+    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+  register: osd_keyring
+
+- name: "Check to see if we need to bootstrap"
+  set_fact:
+    ceph_bootstrap: "{{ 'true' if (not admin_keyring.stat.exists or not osd_keyring.stat.exists) and inventory_hostname == ceph_bootstrap_node else 'false' }}"
+
+- name: "Create ceph.conf"
+  template:
+    src: ceph.conf.j2
+    dest: "/etc/ceph/ceph.conf"
+    mode: "660"
+    owner: ceph
+
+- name: "Bootstrap new cluster"
+  import_tasks: "ceph-mon-bootstrap.yml"
+  when: ceph_bootstrap
+
+- name: "Fetch the client admin keyring"
+  shell: base64 /etc/ceph/ceph.client.admin.keyring
+  register: admin_keyring_data
+  when: not ceph_bootstrap and not admin_keyring.stat.exists
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Install the client admin keyring"
+  copy:
+    dest: "/etc/ceph/ceph.client.admin.keyring"
+    content: "{{ admin_keyring_data.stdout | b64decode }}"
+    mode: "660"
+    owner: ceph
+  when: not ceph_bootstrap and not admin_keyring.stat.exists
+
+- name: "Configure monitor"
+  import_tasks: "ceph-mon.yml"
+  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mon"]
+
+- name: "Configure mds"
+  import_tasks: "ceph-mds.yml"
+  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mds"]
+
+- name: "Configure osd"
+  import_tasks: "ceph-osd.yml"
+  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_osd"]
+
+- name: "Configure pools"
+  import_tasks: "ceph-pools.yml"
+  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mon"]
+
+- name: "Configure filesystems"
+  import_tasks: "ceph-fs.yml"
+  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mon"]
+
+- name: "See if NFS is desired"
+  set_fact:
+    ceph_nfs_exports: "{{ ceph_fs|default([]) | selectattr('nfs', 'defined') | selectattr('nfs', 'equalto', true) | map(attribute='name') | list }}"
+
+- name: "Configure nfs"
+  import_tasks: "ceph-nfs.yml"
+  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mds"] and ceph_nfs_exports | length > 0
+

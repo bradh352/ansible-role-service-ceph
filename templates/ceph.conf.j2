@@ -1,0 +1,35 @@
+[global]
+fsid = {{ ceph_uuid }}
+mon_initial_members = {{ ceph_bootstrap_node|split('.')|first }}
+{% set mon_ips = [] %}
+{% do mon_ips.append(hostvars[ceph_bootstrap_node]['ceph_mon_ip']) %}
+{% for host in groups["ceph_" + ceph_cluster_name + "_mon"] %}
+{%   do mon_ips.append(hostvars[host]['ceph_mon_ip']) %}
+{% endfor %}
+mon_host = {{ mon_ips|unique|join(",") }}
+public_network = {{ ceph_public_network }}
+cluster_network = {{ ceph_cluster_network }}
+auth_cluster_required = cephx
+auth_service_required = cephx
+auth_client_required = cephx
+crush_location = root=default{{ ' room='+ceph_osd_room if ceph_osd_room is defined else '' }}{{ ' row='+ceph_osd_row if ceph_osd_row is defined else '' }}{{ ' rack='+ceph_osd_rack if ceph_osd_rack is defined else '' }}{{ ' chassis='+ceph_osd_chassis if ceph_osd_chassis is defined else '' }} host={{ inventory_hostname|split('.')|first }}
+mon_cluster_log_to_syslog = true
+mon_allow_pool_delete = true
+osd_pool_default_size = 3
+osd_pool_default_min_size = 2
+osd_pool_default_pg_num = 256
+osd_crush_chooseleaf_type = 1
+# Default is 4G, reduce to 1G for hyperconverged systems to dedicate more ram
+# to other processes.
+osd_memory_target = 1073741824
+
+{% for host in groups["ceph_" + ceph_cluster_name + "_mon"] %}
+[mon.{{ host|split('.')|first }}]
+    host = {{ host|split('.')|first }}
+    mon addr = {{ hostvars[host]['ceph_mon_ip'] }}:6789
+{% endfor %}
+
+{% for host in groups["ceph_" + ceph_cluster_name + "_mds"]|default([]) %}
+[mds.{{ host|split('.')|first }}]
+    host = {{ host|split('.')|first }}
+{% endfor %}

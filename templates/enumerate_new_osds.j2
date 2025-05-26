@@ -1,0 +1,7 @@
+{% set new_osds = [] %}
+{% for name, device in ansible_facts["devices"].items() %}
+{%   if device["host"]|default("")|length > 0 and device["removable"]|default(1)|int == 0 and device["rotational"]|default(1)|int == 0 and device["partitions"]|default({})|length == 0 and device["holders"]|default({})|length == 0 and device["size"]|default(0)|human_to_bytes|int > "1 TB"|human_to_bytes|int %}
+{%     do new_osds.append(name) %}
+{%   endif %}
+{% endfor %}
+[ {{ new_osds|join(",") }} ]

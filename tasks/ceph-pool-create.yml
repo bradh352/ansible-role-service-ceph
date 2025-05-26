@@ -1,0 +1,10 @@
+---
+- name: "Create pool {{ pool_name }}"
+  shell: "ceph osd pool create {{ pool_name }} replicated --autoscale-mode=on"
+
+- name: "Associate pool {{ pool_name }} with application {{ pool_application }}"
+  shell: "ceph osd pool application enable {{ pool_name }} {{ pool_application }}"
+
+- name: "Set bulk mode on pool {{ pool_name }}"
+  shell: "ceph osd pool set {{ pool_name }} bulk true"
+  when: pool_bulk

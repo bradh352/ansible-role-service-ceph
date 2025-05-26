@@ -1,0 +1,25 @@
+---
+- name: "Make sure /var/lib/ceph/bootstrap-osd exists"
+  file:
+    path: "/var/lib/ceph/boostrap-osd"
+    owner: ceph
+    state: directory
+
+- name: "See if we have the osd bootstrap keyring installed"
+  stat:
+    path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+  register: osd_bootstrap_keyring
+
+- name: "Fetch the osd bootstrap keyring"
+  shell: base64 /var/lib/ceph/bootstrap-osd/ceph.keyring
+  register: osd_bootstrap_keyring_data
+  when: not osd_bootstrap_keyring.stat.exists
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Install the osd bootstrap keyring"
+  copy:
+    dest: "/var/lib/ceph/bootstrap-osd/ceph.keyring"
+    content: "{{ osd_bootstrap_keyring_data.stdout | b64decode }}"
+    mode: "660"
+    owner: ceph
+  when: not osd_bootstrap_keyring.stat.exists
