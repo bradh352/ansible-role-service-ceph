@@ -69,6 +69,12 @@ This role is initially targeting Ubuntu, and tested on 24.04LTS.
   * `nfs`: Boolean.  Defaults to false.  If set to true, will deploy NFS
     services on each member of the mds group.  It is recommended to use a
     Virtual IP such as through Keepalived High Availability/Fail Over.
+  * `nfs_root`: Subtree within the CephFS for the mountpoint.  It is often
+    desirable to share a single CephFS instance with multiple users and delegate
+    permissions per subtree.  Defaults to '/'.  Should specify a path like
+    '/export'.
+  * `nfs_export`: Name to export the filesytem as. If not specified, the same as
+    `name`.
 
 
 ## Groups used by this role

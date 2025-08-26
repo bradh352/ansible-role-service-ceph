@@ -15,6 +15,18 @@
     proto: tcp
     # Only public network is needed
 
+- name: "Make NFS subtrees"
+  shell: |
+    mkdir -p /mnt/cephfs-temp
+    mount -t ceph admin@.{{ item.name }}=/ /mnt/cephfs-temp
+    mkdir -p /mnt/cephfs-temp/{{ item.nfs_root }}
+    chmod 777 /mnt/cephfs-temp/{{ item.nfs_root }}
+    umount /mnt/cephfs-temp
+    rm -rf /mnt/cephfs-temp
+  with_items: "{{ ceph_fs }}"
+  when: item.nfs | default(false) and item.nfs_root is defined
+  run_once: true
+
 - name: "Write Ganesha configuration"
   template:
     src: nfs.conf.j2

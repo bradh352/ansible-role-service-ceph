@@ -64,7 +64,8 @@ MDCACHE {
 	Dir_Chunk = 0;
 }
 
-{% for export in ceph_nfs_exports %}
+{% for export in ceph_fs %}
+{%   if export.nfs|default(false) %}
 EXPORT
 {
 	# Unique export ID number for this export
@@ -84,13 +85,13 @@ EXPORT
 	# reachable via an exported subtree.
 	#
 	# For that reason, we just export "/" here.
-	Path = /;
+	Path = {{ export.nfs_root | default("/") }};
 
 	#
 	# The pseudoroot path. This is where the export will appear in the
 	# NFS pseudoroot namespace.
 	#
-	Pseudo = /{{ export }}/;
+	Pseudo = {{ export.nfs_export | default("/" ~ export.name ~ "/") }};
 
 	# We want to be able to read and write
 	Access_Type = RW;
@@ -127,7 +128,7 @@ EXPORT
 		# name. The default is to mount the default filesystem in the
 		# cluster (usually the first one created).
 		#
-		Filesystem = "{{ export }}";
+		Filesystem = "{{ export.name }}";
 
 		#
 		# Ceph clusters have their own authentication scheme (cephx).
@@ -155,6 +156,7 @@ EXPORT
 		# Secret_Access_Key = "YOUR SECRET KEY HERE";
 	}
 }
+{%   endif %}
 {% endfor %}
 
 # Config block for FSAL_CEPH
