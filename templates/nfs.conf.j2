@@ -85,13 +85,15 @@ EXPORT
 	# reachable via an exported subtree.
 	#
 	# For that reason, we just export "/" here.
-	Path = {{ export.nfs_root | default("/") }};
+{%     set root = export.nfs_root | default("/") %}
+	Path = {{ ("" if root.startswith("/") else "/") ~ root ~ ("" if root.endswith("/") else "/") }};
 
 	#
 	# The pseudoroot path. This is where the export will appear in the
 	# NFS pseudoroot namespace.
 	#
-	Pseudo = {{ export.nfs_export | default("/" ~ export.name ~ "/") }};
+{%     set pseudo = export.nfs_export | default(export.name) %}
+	Pseudo = {{ ("" if pseudo.startswith("/") else "/") ~ pseudo ~ ("" if pseudo.endswith("/") else "/") }};
 
 	# We want to be able to read and write
 	Access_Type = RW;

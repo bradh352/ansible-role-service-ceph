@@ -25,6 +25,7 @@
     rm -rf /mnt/cephfs-temp
   with_items: "{{ ceph_fs }}"
   when: item.nfs | default(false) and item.nfs_root is defined
+  changed_when: false
   run_once: true
 
 - name: "Write Ganesha configuration"
