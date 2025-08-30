@@ -143,3 +143,7 @@
   import_tasks: "ceph-nfs.yml"
   when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mds"] and ceph_nfs_exports | length > 0
 
+- name: "Configure RGW"
+  import_tasks: "ceph-rgw.yml"
+  when: groups["ceph_" + ceph_cluster_name + "_rgw"] is defined and inventory_hostname in groups["ceph_" + ceph_cluster_name + "_rgw"]
+

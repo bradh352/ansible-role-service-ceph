@@ -75,20 +75,26 @@ This role is initially targeting Ubuntu, and tested on 24.04LTS.
     '/export'.
   * `nfs_export`: Name to export the filesytem as. If not specified, the same as
     `name`.
-
+* `ceph_rgw`: Define this dictionary with the below members if using rgw.
+  * `realm`: Name of the realm.
+  * `zonegroup`: Name of the zone group.
+  * `zone`: Name of the zone.
+  * `port`: Port for RGW service to listen on.  If not specified, defaults to
+    `7480`.
 
 ## Groups used by this role
 
 NOTE: When `ceph_cluster_name` is specified below, all hyphens (`-`) will be
       replaced with underscores (`_`) to comply with group name requirements.
 * `ceph_{{ ceph_cluster_name }}_mon`: All members of this group will deploy
-   monitors.  If this is the first monitor being deployed, `ceph_bootstrap=true`
-   must be specified on the command line.
+  monitors.
 * `ceph_{{ ceph_cluster_name }}_mds`: All members of this group will deploy
-   mds daemons.
-* `ceph_{{ ceph_cluster_name}}_osd`: All members of this group will deploy
-   OSDs. Disks available on the host will automatically be created as OSDs
-   as long as they are non-removable, do not currently contain a partition
-   table, and are at least 1TB in size.
+  mds daemons.
+* `ceph_{{ ceph_cluster_name }}_osd`: All members of this group will deploy
+  OSDs. Disks available on the host will automatically be created as OSDs
+  as long as they are non-removable, do not currently contain a partition
+  table, and are at least 1TB in size.
+* `ceph_{{ ceph_cluster_name }}_rgw`: All members of this group will deploy
+  rados gateways.
 
 

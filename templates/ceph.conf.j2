@@ -33,3 +33,15 @@ osd_memory_target = 1073741824
 [mds.{{ host|split('.')|first }}]
     host = {{ host|split('.')|first }}
 {% endfor %}
+
+{% if groups["ceph_" + ceph_cluster_name + "_rgw"] is defined and inventory_hostname in groups["ceph_" + ceph_cluster_name + "_rgw"] %}
+[client.rgw.{{ inventory_hostname|split('.')|first }}]
+host = {{ inventory_hostname|split('.')|first }}
+keyring = /var/lib/ceph/radosgw/ceph-rgw.{{ inventory_hostname|split('.')|first }}/keyring
+log_file = /var/log/ceph/ceph-rgw-{{ inventory_hostname|split('.')|first }}.log
+rgw_frontends = "beast port={{ ceph_rgw["port"]|default(7480) }}"
+rgw_thread_pool_size = 512
+rgw_realm = "{{ ceph_rgw['realm'] }}"
+rgw_zonegroup = "{{ ceph_rgw['zonegroup'] }}"
+rgw_zone = "{{ ceph_rgw['zone'] }}"
+{% endif %}
