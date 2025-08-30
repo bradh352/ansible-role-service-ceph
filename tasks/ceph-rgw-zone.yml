@@ -1,0 +1,82 @@
+---
+- name: "Generate endpoint list"
+  set_fact:
+    rgw_endpoints: >-
+      {%- set items = [] %}
+      {%- for host in groups["ceph_" + ceph_cluster_name + "_rgw"] %}
+      {%-   do items.append("http://" ~ host ~ ":" ~ ceph_rgw["port"]|default(7480)) %}
+      {%- endfor %}
+      {{- items -}}
+
+- name: "See if realm exists"
+  shell: radosgw-admin realm get --rgw-realm={{ ceph_rgw["realm"] }}
+  failed_when: false
+  changed_when: false
+  register: ceph_rgw_realm_get
+
+- name: "Create realm"
+  shell: radosgw-admin realm create --rgw-realm={{ ceph_rgw["realm"] }} --default
+  notify: rgw_period
+  when: ceph_rgw_realm_get.rc != 0
+
+- name: "Load realm metadata"
+  shell: radosgw-admin realm get --rgw-realm={{ ceph_rgw["realm"] }}
+  changed_when: false
+  register: ceph_rgw_realm_get
+
+- name: "Parse realm metadata as json"
+  set_fact:
+    ceph_rgw_realm: "{{ ceph_rgw_realm_get.stdout | from_yaml }}"
+
+- name: "See if zone group exists"
+  shell: radosgw-admin zonegroup get --rgw-zonegroup={{ ceph_rgw["zonegroup"] }}
+  failed_when: false
+  changed_when: false
+  register: ceph_rgw_zonegroup_get
+
+- name: "Create zonegroup"
+  shell: radosgw-admin zonegroup create --rgw-zonegroup={{ ceph_rgw["zonegroup"] }} --rgw-realm={{ ceph_rgw["realm"] }} --endpoints={{ rgw_endpoints | join(",") }} --master --default
+  notify: rgw_period
+  when: ceph_rgw_zonegroup_get.rc != 0
+
+- name: "Load zonegroup metadata"
+  shell: radosgw-admin zonegroup get --rgw-zonegroup={{ ceph_rgw["zonegroup"] }}
+  changed_when: false
+  register: ceph_rgw_zonegroup_get
+
+- name: "Parse zonegroup metadata as json"
+  set_fact:
+    ceph_rgw_zonegroup: "{{ ceph_rgw_zonegroup_get.stdout | from_yaml }}"
+
+- name: "Update zonegroup metadata"
+  shell: radosgw-admin zonegroup modify --rgw-zonegroup={{ ceph_rgw["zonegroup"] }} --rgw-realm={{ ceph_rgw["realm"] }} --endpoints={{ rgw_endpoints | join(",") }} --master --default
+  notify: rgw_period
+  when: ceph_rgw_zonegroup["endpoints"] != rgw_endpoints or not ceph_rgw_zonegroup["is_master"] or ceph_rgw_zonegroup["realm_id"] != ceph_rgw_realm["id"]
+
+- name: "See if zone exists"
+  shell: radosgw-admin zone get --rgw-zone={{ ceph_rgw["zone"] }}
+  failed_when: false
+  changed_when: false
+  register: ceph_rgw_zone_get
+
+- name: "Create zone"
+  shell: radosgw-admin zone create --rgw-zonegroup={{ ceph_rgw["zonegroup"] }} --endpoints={{ rgw_endpoints | join(",") }} --rgw-zone={{ ceph_rgw["zone"] }} --master --default
+  notify: rgw_period
+  when: ceph_rgw_zone_get.rc != 0
+
+- name: "Load zone metadata from zonegroup"
+  shell: "radosgw-admin zonegroup get --rgw-zonegroup=us | jq '.zones.[] | select(contains({\"name\": \"homelab\"}))'"
+  changed_when: false
+  register: ceph_rgw_zone_get
+
+- name: "Parse zone metadata as json"
+  set_fact:
+    ceph_rgw_zone: "{{ ceph_rgw_zone_get.stdout | from_yaml }}"
+
+- name: "Update zone metadata"
+  shell: radosgw-admin zone modify --rgw-zonegroup={{ ceph_rgw["zonegroup"] }} --endpoints={{ rgw_endpoints | join(",") }} --rgw-zone={{ ceph_rgw["zone"] }} --master --default
+  notify: rgw_period
+  when: ceph_rgw_zone["endpoints"] != rgw_endpoints
+
+- name: "Flush handlers"
+  meta: flush_handlers

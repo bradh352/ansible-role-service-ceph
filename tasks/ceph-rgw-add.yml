@@ -1,0 +1,18 @@
+---
+
+- name: Create rgw data directory
+  file:
+    path: "/var/lib/ceph/radosgw/ceph-rgw.{{ inventory_hostname|split('.')|first }}"
+    owner: ceph
+    state: directory
+
+- name: Fetch the keyring
+  shell: "ceph auth get-or-create client.rgw.`hostname -s` osd 'allow rwx' mon 'allow rwx' -o /var/lib/ceph/radosgw/ceph-rgw.{{ inventory_hostname|split('.')|first }}/keyring"
+
+- name: Set the keyring file permissions
+  file:
+    path: "/var/lib/ceph/radosgw/ceph-rgw.{{ inventory_hostname|split('.')|first }}/keyring"
+    owner: ceph
+    group: ceph
+
+

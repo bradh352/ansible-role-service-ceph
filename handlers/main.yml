@@ -3,3 +3,6 @@
   service:
     name: nfs-ganesha
     state: restarted
+
+- name: rgw_period
+  shell: radosgw-admin period update --commit
