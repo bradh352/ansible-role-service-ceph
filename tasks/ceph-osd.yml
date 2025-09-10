@@ -2,6 +2,12 @@
 - name: "Make sure we have the osd boostrap keyring"
   import_tasks: "ceph-osd-bootstrap-keyring.yml"
 
+- name: "Refresh facts"
+  ansible.builtin.setup:
+    gather_subset:
+      - mounts
+      - devices
+
 - name: "Gather a list of new OSDs"
   set_fact:
     ceph_new_osds_json: "{{ lookup('template', 'enumerate_new_osds.j2') }}"

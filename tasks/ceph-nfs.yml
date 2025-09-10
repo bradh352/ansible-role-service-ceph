@@ -42,3 +42,6 @@
     name: nfs-ganesha
     enabled: true
     state: started
+
+- name: "Flush handlers"
+  meta: flush_handlers
