@@ -40,6 +40,7 @@
     path: /etc/ceph/ceph.client.admin.keyring
   delegate_to: "{{ item }}"
   ignore_unreachable: yes
+  ignore_errors: true
   failed_when: false
   changed_when: false
   register: ceph_nodes_adminkeyring
@@ -50,6 +51,7 @@
     path: /var/lib/ceph/bootstrap-osd/ceph.keyring
   delegate_to: "{{ item }}"
   ignore_unreachable: yes
+  ignore_errors: true
   failed_when: false
   changed_when: false
   register: ceph_nodes_osdkeyring
