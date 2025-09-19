@@ -19,9 +19,12 @@ osd_pool_default_size = 3
 osd_pool_default_min_size = 2
 osd_pool_default_pg_num = 256
 osd_crush_chooseleaf_type = 1
-# Default is 4G, reduce to 1G for hyperconverged systems to dedicate more ram
+# Default is 4G, reduce to 2G for hyperconverged systems to dedicate more ram
 # to other processes.
-osd_memory_target = 1073741824
+osd_memory_target = 2147483648
+# Enable SSD Discards (Trim)
+bdev_enable_discard = true
+bdev_async_discard_threads = 1
 
 {% for host in groups["ceph_" + ceph_cluster_name + "_mon"] %}
 [mon.{{ host|split('.')|first }}]
