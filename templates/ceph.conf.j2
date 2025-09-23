@@ -25,6 +25,8 @@ osd_memory_target = 2147483648
 # Enable SSD Discards (Trim)
 bdev_enable_discard = true
 bdev_async_discard_threads = 1
+# Don't only read from primary OSD, read from replicas too
+rbd_read_from_replica_policy=balance
 
 {% for host in groups["ceph_" + ceph_cluster_name + "_mon"] %}
 [mon.{{ host|split('.')|first }}]
