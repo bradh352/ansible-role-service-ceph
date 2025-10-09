@@ -30,7 +30,7 @@ This role is initially targeting Ubuntu, and tested on 24.04LTS.
   var for the cluster.
 * `ceph_uuid`: A unique UUID to reference the cluster.  Use `uuidgen` to
   generate this value.  This should be a group var for the cluster.
- `ceph_mon_ip`: Must be unique for each monitor node in the cluster.  This
+  `ceph_mon_ip`: Must be unique for each monitor node in the cluster.  This
   is a node-specific value.
 * `ceph_osd_room`: Optional. Short alphanumeric (no spaces) name of the room in
   which the ceph host resides.  Specifying this will place the OSD in this
@@ -45,6 +45,8 @@ This role is initially targeting Ubuntu, and tested on 24.04LTS.
   chassis (such as when hosts share a single chassis, e.g. Supermicro microcloud)
   in which the ceph host resides.  Specifying this will place the OSD in this
   bucket to assist in determining the proper failure domains.
+* `ceph_default_pool_size`: Optional. Default pool size.  Default is `3`
+* `ceph_default_min_pool_size`: Optional. Default min pool size.  Default is `2`.
 
 ### Variables for configuring resources
 

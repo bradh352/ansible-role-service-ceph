@@ -15,8 +15,8 @@ auth_client_required = cephx
 crush_location = root=default{{ ' room='+ceph_osd_room if ceph_osd_room is defined else '' }}{{ ' row='+ceph_osd_row if ceph_osd_row is defined else '' }}{{ ' rack='+ceph_osd_rack if ceph_osd_rack is defined else '' }}{{ ' chassis='+ceph_osd_chassis if ceph_osd_chassis is defined else '' }} host={{ inventory_hostname|split('.')|first }}
 mon_cluster_log_to_syslog = true
 mon_allow_pool_delete = true
-osd_pool_default_size = 3
-osd_pool_default_min_size = 2
+osd_pool_default_size = {{ ceph_default_pool_size }}
+osd_pool_default_min_size = {{ ceph_default_min_pool_size }}
 osd_pool_default_pg_num = 256
 osd_crush_chooseleaf_type = 1
 # Default is 4G, reduce to 2G for hyperconverged systems to dedicate more ram
