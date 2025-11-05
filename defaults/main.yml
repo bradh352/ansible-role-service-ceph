@@ -1,3 +1,4 @@
 ---
 ceph_default_pool_size: 3
 ceph_default_min_pool_size: 2
+ceph_prometheus: false

@@ -83,6 +83,9 @@ This role is initially targeting Ubuntu, and tested on 24.04LTS.
   * `zone`: Name of the zone.
   * `port`: Port for RGW service to listen on.  If not specified, defaults to
     `7480`.
+* `ceph_prometheus`: Boolean. Default `false`. Whether or not to enable prometheus
+  in the ceph mgr.  Will listen on port 9283 on mgr nodes.  Automatically
+  enables performance counters and stats for all pools.
 
 ## Groups used by this role
 

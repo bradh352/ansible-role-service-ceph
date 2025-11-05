@@ -80,3 +80,23 @@
 - name: "Ceph: enable msgr2 protocol"
   shell: "ceph mon enable-msgr2"
   when: ceph_bootstrap
+
+- name: "See if prometheus is enabled"
+  when: ceph_prometheus
+  shell: "ceph mgr module ls | grep prometheus | awk '{ print $2 };'"
+  register: prometheus_enabled
+
+- name: "Enable prometheus"
+  when: ceph_prometheus and 'on' in prometheus_enabled.stdout
+  shell: |
+    ceph mgr module enable prometheus && \
+    ceph config set mgr mgr/prometheus/exclude_perf_counters false && \
+    ceph config set mgr mgr/prometheus/rbd_stats_pools "*"
+
+- name: "UFW: enable prometheus port"
+  when: ceph_prometheus
+  community.general.ufw:
+    rule: allow
+    port: "9283"
+    proto: tcp
+    dest: "{{ ceph_mon_ip }}"
