@@ -85,9 +85,10 @@
   when: ceph_prometheus
   shell: "ceph mgr module ls | grep prometheus | awk '{ print $2 };'"
   register: prometheus_enabled
+  changed_when: false
 
 - name: "Enable prometheus"
-  when: ceph_prometheus and 'on' in prometheus_enabled.stdout
+  when: ceph_prometheus and 'on' not in prometheus_enabled.stdout
   shell: |
     ceph mgr module enable prometheus && \
     ceph config set mgr mgr/prometheus/exclude_perf_counters false && \
