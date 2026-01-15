@@ -19,9 +19,6 @@ osd_pool_default_size = {{ ceph_default_pool_size }}
 osd_pool_default_min_size = {{ ceph_default_min_pool_size }}
 osd_pool_default_pg_num = 256
 osd_crush_chooseleaf_type = 1
-# Default is 4G, reduce to 2G for hyperconverged systems to dedicate more ram
-# to other processes.
-osd_memory_target = 2147483648
 # Enable SSD Discards (Trim)
 bdev_enable_discard = true
 bdev_async_discard_threads = 1
