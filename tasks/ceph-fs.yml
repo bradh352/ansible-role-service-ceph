@@ -1,12 +1,12 @@
 ---
 - name: "Retrieve ceph filesystems"
-  shell: "ceph fs ls -f json"
+  ansible.builtin.command: "ceph fs ls -f json"
   register: ceph_existing_filesystems
   changed_when: false
   run_once: true
 
 - name: "Create ceph filesystems"
-  include_tasks: ceph-fs-create.yml
+  ansible.builtin.include_tasks: ceph-fs-create.yml
   vars:
     fs_name: "{{ fs.name }}"
     fs_nfs: "{{ fs.nfs }}"

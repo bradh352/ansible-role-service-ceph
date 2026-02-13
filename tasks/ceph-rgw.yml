@@ -6,20 +6,20 @@
     state: present
 
 - name: "RGW zone creation and verification"
-  include_tasks: "ceph-rgw-zone.yml"
+  ansible.builtin.include_tasks: "ceph-rgw-zone.yml"
   run_once: true
 
 - name: "Check to see if rgw configuration exists"
-  stat:
-    path: "/var/lib/ceph/radosgw/ceph-rgw.{{ inventory_hostname|split('.')|first }}"
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/radosgw/ceph-rgw.{{ inventory_hostname | split('.') | first }}"
   register: ceph_rgw_configured
 
 - name: "RGW add"
-  include_tasks: "ceph-rgw-add.yml"
+  ansible.builtin.include_tasks: "ceph-rgw-add.yml"
   when: not ceph_rgw_configured.stat.exists
 
 - name: "Ensure ceph-radosgw is enabled and started"
-  service:
+  ansible.builtin.service:
     name: "ceph-radosgw@rgw.{{ inventory_hostname | split('.') | first }}"
     state: started
     enabled: true

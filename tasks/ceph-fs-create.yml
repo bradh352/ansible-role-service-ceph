@@ -1,7 +1,6 @@
 ---
-
 - name: "Create data and metadata pools for {{ fs_name }}"
-  include_tasks: ceph-pool-create.yml
+  ansible.builtin.include_tasks: ceph-pool-create.yml
   vars:
     pool_name: "{{ item.name }}"
     pool_replica: 3
@@ -13,5 +12,4 @@
     - { "name": "{{ fs_name }}_metadata", "bulk": false }
 
 - name: "Create fs {{ fs_name }}"
-  shell: "ceph fs new {{ fs_name }} {{ fs_name }}_metadata {{ fs_name }}_data"
-
+  ansible.builtin.command: "ceph fs new {{ fs_name }} {{ fs_name }}_metadata {{ fs_name }}_data"

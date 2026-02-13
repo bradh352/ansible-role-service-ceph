@@ -1,7 +1,6 @@
 ---
 - name: "Make sure we have the osd boostrap keyring"
-  import_tasks: "ceph-osd-bootstrap-keyring.yml"
-
+  ansible.builtin.import_tasks: "ceph-osd-bootstrap-keyring.yml"
 - name: "Refresh facts"
   ansible.builtin.setup:
     gather_subset:
@@ -9,15 +8,15 @@
       - devices
 
 - name: "Gather a list of new OSDs"
-  set_fact:
+  ansible.builtin.set_fact:
     ceph_new_osds_json: "{{ lookup('template', 'enumerate_new_osds.j2') }}"
 
 - name: "Parse list of new OSDs"
-  set_fact:
-    ceph_new_osds: "{{ ceph_new_osds_json|from_yaml }}"
+  ansible.builtin.set_fact:
+    ceph_new_osds: "{{ ceph_new_osds_json | from_yaml }}"
 
 - name: "Create OSDs"
-  shell: "ceph-volume lvm create --data /dev/{{ item }}"
+  ansible.builtin.command: "ceph-volume lvm create --data /dev/{{ item }}"
   with_items: "{{ ceph_new_osds }}"
 
 - name: "UFW: Allow ceph osd traffic"

@@ -1,7 +1,7 @@
 ---
 - name: "Check to see if monitor configuration exists"
-  stat:
-    path: "/var/lib/ceph/mon/ceph-{{ inventory_hostname|split('.')|first }}"
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/mon/ceph-{{ inventory_hostname | split('.') | first }}"
   register: ceph_mon_configured
 
 - name: "UFW: Allow ceph monitor traffic v1"
@@ -19,31 +19,31 @@
     # Only public network is needed
 
 - name: "monitor add"
-  include_tasks: "ceph-mon-add.yml"
+  ansible.builtin.include_tasks: "ceph-mon-add.yml"
   when: not ceph_mon_configured.stat.exists
 
 - name: "Ensure ceph-mon is enabled and started"
-  service:
+  ansible.builtin.service:
     name: "ceph-mon@{{ inventory_hostname | split('.') | first }}"
     state: started
     enabled: true
 
 - name: "Make sure the mgr data directory exists"
-  file:
+  ansible.builtin.file:
     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname | split('.') | first }}"
     state: directory
 
 - name: "Make sure the mgr has a keyring"
-  stat:
+  ansible.builtin.stat:
     path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname | split('.') | first }}/keyring"
   register: mgr_keyring
 
 - name: "Make the keyring"
   when: not mgr_keyring.stat.exists
-  shell: "ceph auth get-or-create mgr.{{ inventory_hostname | split('.') | first }} mon 'allow profile mgr' osd 'allow *' mds 'allow *' -o /var/lib/ceph/mgr/ceph-{{ inventory_hostname | split('.') | first }}/keyring"
-
+  ansible.builtin.shell: "ceph auth get-or-create mgr.{{ inventory_hostname | split('.') | first }} mon 'allow profile mgr' osd 'allow *' mds 'allow *' -o /var/lib/ceph/mgr/ceph-{{
+    inventory_hostname | split('.') | first }}/keyring"
 - name: "Make sure permissions are proper"
-  file:
+  ansible.builtin.file:
     path: "{{ item }}"
     owner: ceph
   with_items:
@@ -57,43 +57,42 @@
     dest: "{{ ceph_mon_ip }}"
 
 - name: "Ensure ceph-mgr is enabled and started"
-  service:
+  ansible.builtin.service:
     name: "ceph-mgr@{{ inventory_hostname | split('.') | first }}"
     state: started
     enabled: true
 
 - name: "Ceph: check auth_allow_insecure_global_id_reclaim"
-  shell: ceph config get mon auth_allow_insecure_global_id_reclaim
+  ansible.builtin.command: ceph config get mon auth_allow_insecure_global_id_reclaim
   register: ceph_insecure_global_id
   changed_when: false
   run_once: true
 
 - name: "Ceph: set auth_allow_insecure_global_id_reclaim to false"
-  shell: "ceph config set mon auth_allow_insecure_global_id_reclaim false"
+  ansible.builtin.command: "ceph config set mon auth_allow_insecure_global_id_reclaim false"
   when: ceph_insecure_global_id.stdout_lines|first == "true"
   run_once: true
 
 - name: "Ceph: enable osd pg autoscaling by default"
-  shell: "ceph config set global osd_pool_default_pg_autoscale_mode on"
+  ansible.builtin.command: "ceph config set global osd_pool_default_pg_autoscale_mode on"
   when: ceph_bootstrap
 
 - name: "Ceph: enable msgr2 protocol"
-  shell: "ceph mon enable-msgr2"
+  ansible.builtin.command: "ceph mon enable-msgr2"
   when: ceph_bootstrap
 
 - name: "See if prometheus is enabled"
   when: ceph_prometheus
-  shell: "ceph mgr module ls | grep prometheus | awk '{ print $2 };'"
+  ansible.builtin.shell: "ceph mgr module ls | grep prometheus | awk '{ print $2 };'"
   register: prometheus_enabled
   changed_when: false
 
 - name: "Enable prometheus"
   when: ceph_prometheus and 'on' not in prometheus_enabled.stdout
-  shell: |
+  ansible.builtin.shell: |
     ceph mgr module enable prometheus && \
     ceph config set mgr mgr/prometheus/exclude_perf_counters false && \
     ceph config set mgr mgr/prometheus/rbd_stats_pools "*"
-
 - name: "UFW: enable prometheus port"
   when: ceph_prometheus
   community.general.ufw:

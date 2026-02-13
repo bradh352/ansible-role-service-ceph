@@ -1,32 +1,34 @@
 ---
 - name: "ensure MDS directory exists"
-  file:
+  ansible.builtin.file:
     path: "/var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}"
     state: directory
     owner: ceph
 
 - name: "see if MDS keyring exists"
-  stat:
+  ansible.builtin.stat:
     path: "/var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}/keyring"
   register: mds_keyring
 
 - name: "Create MDS keyring"
-  shell: "ceph-authtool --create-keyring /var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}/keyring --gen-key -n mds.{{ inventory_hostname | split('.') | first }}"
+  ansible.builtin.command: "ceph-authtool --create-keyring /var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}/keyring --gen-key -n mds.{{ inventory_hostname
+    | split('.') | first }}"
   when: not mds_keyring.stat.exists
 
 - name: "Make sure permissions are proper"
-  file:
+  ansible.builtin.file:
     path: "{{ item }}"
     owner: ceph
   with_items:
     - "/var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}/keyring"
 
 - name: "Import keyring"
-  shell: ceph auth add mds.{{ inventory_hostname | split('.') | first }} osd "allow rwx" mds "allow *" mon "allow profile mds" -i /var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}/keyring
+  ansible.builtin.shell: ceph auth add mds.{{ inventory_hostname | split('.') | first }} osd "allow rwx" mds "allow *" mon "allow profile mds" -i
+    /var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}/keyring
   when: not mds_keyring.stat.exists
 
 - name: "Ensure ceph-mds is enabled and started"
-  service:
+  ansible.builtin.service:
     name: "ceph-mds@{{ inventory_hostname | split('.') | first }}"
     state: started
     enabled: true
