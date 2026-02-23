@@ -68,7 +68,7 @@
   when: ceph_rgw_zone_get.rc != 0
 
 - name: "Load zone metadata from zonegroup"
-  ansible.builtin.shell: "radosgw-admin zonegroup get --rgw-zonegroup=us | jq '.zones.[] | select(contains({\"name\": \"homelab\"}))'"
+  ansible.builtin.shell: "radosgw-admin zonegroup get --rgw-zonegroup={{ ceph_rgw['zonegroup'] }} | jq '.zones.[] | select(contains({\"name\": \"{{ ceph_rgw['zone'] }}\"}))'"
   changed_when: false
   register: ceph_rgw_zone_get
 
