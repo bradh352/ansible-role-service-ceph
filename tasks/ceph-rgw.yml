@@ -18,6 +18,25 @@
   ansible.builtin.include_tasks: "ceph-rgw-add.yml"
   when: not ceph_rgw_configured.stat.exists
 
+- name: "Ceph radosgw needs higher priority to make sure they're not starved."
+  block:
+    - name: "ensure systemd ceph-radosgw@ override directory exists"
+      ansible.builtin.file:
+        path: /etc/systemd/system/ceph-radosgw@.service.d
+        state: directory
+        owner: "root"
+        mode: "0755"
+    - name: "systemd install ceph-radosgw@ override"
+      ansible.builtin.copy:
+        src: ceph-radosgw.override.conf
+        dest: /etc/systemd/system/ceph-radosgw@.service.d/override.conf
+        mode: "0644"
+        owner: root
+      register: ceph_radosgw_override
+    - name: "systemd reload"
+      when: ceph_radosgw_override.changed
+      ansible.builtin.command: "systemctl daemon-reload"
+
 - name: "Ensure ceph-radosgw is enabled and started"
   ansible.builtin.service:
     name: "ceph-radosgw@rgw.{{ inventory_hostname | split('.') | first }}"

@@ -22,6 +22,25 @@
   ansible.builtin.include_tasks: "ceph-mon-add.yml"
   when: not ceph_mon_configured.stat.exists
 
+- name: "Ceph Monitors need higher priority to make sure they're not starved."
+  block:
+    - name: "ensure systemd ceph-mon@ override directory exists"
+      ansible.builtin.file:
+        path: /etc/systemd/system/ceph-mon@.service.d
+        state: directory
+        owner: "root"
+        mode: "0755"
+    - name: "systemd install ceph-mon@ override"
+      ansible.builtin.copy:
+        src: ceph-mon.override.conf
+        dest: /etc/systemd/system/ceph-mon@.service.d/override.conf
+        mode: "0644"
+        owner: root
+      register: ceph_mon_override
+    - name: "systemd reload"
+      when: ceph_mon_override.changed
+      ansible.builtin.command: "systemctl daemon-reload"
+
 - name: "Ensure ceph-mon is enabled and started"
   ansible.builtin.service:
     name: "ceph-mon@{{ inventory_hostname | split('.') | first }}"
@@ -55,6 +74,25 @@
     port: "6800:7300"
     proto: tcp
     dest: "{{ ceph_mon_ip }}"
+
+- name: "Ceph managers need higher priority to make sure they're not starved."
+  block:
+    - name: "ensure systemd ceph-mgr@ override directory exists"
+      ansible.builtin.file:
+        path: /etc/systemd/system/ceph-mgr@.service.d
+        state: directory
+        owner: "root"
+        mode: "0755"
+    - name: "systemd install ceph-mgr@ override"
+      ansible.builtin.copy:
+        src: ceph-mgr.override.conf
+        dest: /etc/systemd/system/ceph-mgr@.service.d/override.conf
+        mode: "0644"
+        owner: root
+      register: ceph_mgr_override
+    - name: "systemd reload"
+      when: ceph_mgr_override.changed
+      ansible.builtin.command: "systemctl daemon-reload"
 
 - name: "Ensure ceph-mgr is enabled and started"
   ansible.builtin.service:

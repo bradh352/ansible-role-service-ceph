@@ -7,6 +7,25 @@
       - mounts
       - devices
 
+- name: "Ceph OSDs need higher priority to make sure they're not starved."
+  block:
+    - name: "ensure systemd ceph-osd@ override directory exists"
+      ansible.builtin.file:
+        path: /etc/systemd/system/ceph-osd@.service.d
+        state: directory
+        owner: "root"
+        mode: "0755"
+    - name: "systemd install ceph-osd@ override"
+      ansible.builtin.copy:
+        src: ceph-osd.override.conf
+        dest: /etc/systemd/system/ceph-osd@.service.d/override.conf
+        mode: "0644"
+        owner: root
+      register: ceph_osd_override
+    - name: "systemd reload"
+      when: ceph_osd_override.changed
+      ansible.builtin.command: "systemctl daemon-reload"
+
 - name: "Gather a list of new OSDs"
   ansible.builtin.set_fact:
     ceph_new_osds_json: "{{ lookup('template', 'enumerate_new_osds.j2') }}"
