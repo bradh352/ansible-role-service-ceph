@@ -36,6 +36,25 @@
     group: root
   notify: restart_ganesha
 
+- name: "Ganesha may crash but not auto-restart, we want it to restart."
+  block:
+    - name: "ensure systemd nfs-ganesha override directory exists"
+      ansible.builtin.file:
+        path: /etc/systemd/system/nfs-ganesha.service.d
+        state: directory
+        owner: "root"
+        mode: "0755"
+    - name: "systemd install nfs-ganesha override"
+      ansible.builtin.copy:
+        src: nfs-ganesha.override.conf
+        dest: /etc/systemd/system/nfs-ganesha.service.d/override.conf
+        mode: "0644"
+        owner: root
+      register: ganesha_override
+    - name: "systemd reload"
+      when: ganesha_override.changed
+      ansible.builtin.command: "systemctl daemon-reload"
+
 - name: "Ensure Ganesha is enabled and started"
   ansible.builtin.service:
     name: nfs-ganesha
