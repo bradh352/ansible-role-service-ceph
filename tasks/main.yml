@@ -90,7 +90,7 @@
 
 - name: "Check to see if we need to bootstrap"
   ansible.builtin.set_fact:
-    ceph_bootstrap: "{{ 'true' if (not admin_keyring.stat.exists or not osd_keyring.stat.exists) and inventory_hostname == ceph_bootstrap_node else 'false' }}"
+    ceph_bootstrap: "{{ true if (not admin_keyring.stat.exists or not osd_keyring.stat.exists) and inventory_hostname == ceph_bootstrap_node else false }}"
 
 - name: "Create ceph.conf"
   ansible.builtin.template:
