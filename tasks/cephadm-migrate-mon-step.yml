@@ -1,0 +1,30 @@
+---
+# Called in a loop from cephadm-migrate.yml with _mon_to_adopt set.
+# Runs from the bootstrap node context (run_once loop), delegates to the target.
+
+- name: "Adopt MON daemon on {{ _mon_to_adopt }}"
+  ansible.builtin.command: >
+    cephadm adopt --style legacy --name
+    mon.{{ _mon_to_adopt | split('.') | first }} --skip-pull
+  delegate_to: "{{ _mon_to_adopt }}"
+  when: hostvars[_mon_to_adopt]['_needs_mon_adopt'] | default(false)
+  changed_when: true
+
+- name: "Adopt MGR daemon on {{ _mon_to_adopt }}"
+  ansible.builtin.command: >
+    cephadm adopt --style legacy --name
+    mgr.{{ _mon_to_adopt | split('.') | first }} --skip-pull
+  delegate_to: "{{ _mon_to_adopt }}"
+  when: hostvars[_mon_to_adopt]['_needs_mon_adopt'] | default(false)
+  changed_when: true
+
+- name: "Wait for quorum to restore after adopting {{ _mon_to_adopt }}"
+  ansible.builtin.command: ceph quorum_status --format json
+  register: _quorum_check
+  until: >-
+    (_quorum_check.stdout | from_json).quorum | length >=
+    (groups['ceph_' + ceph_cluster_name + '_mon'] | length // 2 + 1)
+  retries: 30
+  delay: 10
+  changed_when: false
+  when: hostvars[_mon_to_adopt]['_needs_mon_adopt'] | default(false)

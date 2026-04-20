@@ -1,8 +1,5 @@
 ---
-- name: restart_ganesha
-  ansible.builtin.service:
-    name: nfs-ganesha
-    state: restarted
-
-- name: rgw_period
-  ansible.builtin.command: radosgw-admin period update --commit
+- name: "Commit RGW period"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin period update --commit
+  changed_when: true

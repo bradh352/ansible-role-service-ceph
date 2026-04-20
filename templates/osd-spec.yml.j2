@@ -1,0 +1,12 @@
+---
+service_type: osd
+service_id: all-available-{{ ceph_cluster_name }}
+placement:
+  label: osd
+spec:
+  data_devices:
+    min_size: {{ ceph_osd_min_size }}
+{% if ceph_osd_rotational is not none %}
+    rotational: {{ ceph_osd_rotational | bool | lower }}
+{% endif %}
+  filter_logic: AND

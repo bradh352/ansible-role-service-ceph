@@ -1,0 +1,10 @@
+---
+service_type: rgw
+service_id: {{ ceph_rgw['zone'] }}
+placement:
+  label: rgw
+spec:
+  rgw_realm: {{ ceph_rgw['realm'] }}
+  rgw_zonegroup: {{ ceph_rgw['zonegroup'] }}
+  rgw_zone: {{ ceph_rgw['zone'] }}
+  rgw_frontend_port: {{ ceph_rgw['port'] | default(7480) }}

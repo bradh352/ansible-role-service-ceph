@@ -1,0 +1,15 @@
+---
+- name: "Apply global ceph cluster config"
+  ansible.builtin.command: >
+    ceph config set {{ item.who }} {{ item.key }} {{ item.value }}
+  loop:
+    - {who: global, key: osd_pool_default_size, value: "{{ ceph_default_pool_size }}"}
+    - {who: global, key: osd_pool_default_min_size, value: "{{ ceph_default_min_pool_size }}"}
+    - {who: global, key: osd_pool_default_pg_autoscale_mode, value: "on"}
+    - {who: global, key: bdev_enable_discard, value: "true"}
+    - {who: global, key: bdev_async_discard_threads, value: "1"}
+    - {who: global, key: rbd_read_from_replica_policy, value: "balance"}
+    - {who: global, key: auth_allow_insecure_global_id_reclaim, value: "false"}
+    - {who: global, key: mon_cluster_log_to_syslog, value: "true"}
+    - {who: global, key: mon_allow_pool_delete, value: "true"}
+  changed_when: false

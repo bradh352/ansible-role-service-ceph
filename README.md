@@ -6,10 +6,12 @@ Original Repository: https://github.com/bradh352/ansible-role-service-ceph
 
 ## Overview
 
-This role is designed to deploy Ceph in a non-containerized environment.  It can
-deploy Monitors, MDS, and OSDs and is targeting Hyperconvered deployments.
+This role deploys and manages Ceph via **cephadm** — Ceph's container-based
+management framework — targeting hyperconverged deployments. It can deploy
+Monitors, Managers, OSDs, MDS, RadosGW, and NFS-Ganesha.
 
-This role is initially targeting Ubuntu, and tested on 24.04LTS.
+This role targets Ubuntu and is tested on 24.04 LTS. It supports both fresh
+installations and migration from legacy native-package installations.
 
 ## Core variables used by this role
 * `ceph_cluster_name`: This name is used as an organization tool in Ansible.
@@ -86,6 +88,230 @@ This role is initially targeting Ubuntu, and tested on 24.04LTS.
 * `ceph_prometheus`: Boolean. Default `false`. Whether or not to enable prometheus
   in the ceph mgr.  Will listen on port 9283 on mgr nodes.  Automatically
   enables performance counters and stats for all pools.
+
+## Container / cephadm variables
+
+This role deploys Ceph using **cephadm** — Ceph's container-based management
+framework. All daemons run as OCI containers managed by podman.
+
+* `ceph_version`: The Ceph version tag to deploy, e.g. `v19.2`. On a new
+  cluster this controls what image is pulled. On an existing cephadm-managed
+  cluster, **changing this value triggers a rolling upgrade** via
+  `ceph orch upgrade`. Do not change this at the same time as migrating from
+  native packages — migrate first, upgrade separately. Default: `v19.2`.
+* `ceph_container_image`: Container image path, without the tag. Default:
+  `quay.io/ceph/ceph`. Override this when using a private registry mirror
+  (see *Using a private registry mirror* below).
+* `ceph_cephadm_user`: System user created on all nodes that cephadm uses
+  for SSH management. Defaults to `cephadm`. This user is given passwordless
+  sudo on all cluster nodes and holds the SSH keypair used for inter-node
+  communication. The private key lives on all MON nodes (any MON may host the
+  active orchestrator); the public key is distributed to all cluster nodes.
+* `ceph_osd_min_size`: Minimum disk size in bytes for OSD auto-discovery.
+  Disks smaller than this are ignored. Default: `1099511627776` (1 TiB),
+  mirroring the existing 1 TB filter.
+* `ceph_osd_rotational`: Drive type filter. `~` (null) accepts any drive type,
+  `false` selects only SSDs/NVMe, `true` selects only HDDs. Default: `~`.
+* `ceph_container_registry`: Registry hostname used as a prefix for the
+  container image. Default: `quay.io`. Override when pulling from a mirror.
+* `ceph_container_registry_user`: Username for registry authentication.
+  Leave empty for unauthenticated (public) registries. Default: `""`.
+* `ceph_container_registry_password`: Password for registry authentication.
+  Default: `""`.
+
+### Using a private registry mirror
+
+If your nodes cannot reach `quay.io` directly, mirror the Ceph image to an
+internal registry and point the role at it:
+
+```yaml
+# group_vars/ceph_mycluster_cluster.yaml
+ceph_container_registry: "registry.mycompany.com"
+ceph_container_image: "registry.mycompany.com/ceph/ceph"
+# Optional, only if the mirror requires auth:
+ceph_container_registry_user: "robot"
+ceph_container_registry_password: "{{ vault_registry_password }}"
+```
+
+Mirror the image with:
+```bash
+podman pull quay.io/ceph/ceph:v19.2
+podman tag  quay.io/ceph/ceph:v19.2 registry.mycompany.com/ceph/ceph:v19.2
+podman push registry.mycompany.com/ceph/ceph:v19.2
+```
+
+The role configures `/etc/containers/registries.conf.d/ceph-mirror.conf` on
+every node to redirect pulls automatically.
+
+---
+
+## Migrating from native packages to cephadm
+
+### What changes
+
+| Aspect | Before | After |
+|---|---|---|
+| Daemon execution | systemd units running binaries | systemd units running containers via podman |
+| Config file | `/etc/ceph/ceph.conf` | Stored in cluster config DB (`ceph config set`) |
+| NFS config | `/etc/ganesha/ganesha.conf` | Stored in `.nfs` RADOS pool |
+| Binary tools | `/usr/bin/ceph`, `/usr/bin/radosgw-admin`, etc. | Available via `cephadm shell` |
+| Upgrade path | `apt upgrade ceph` | `ceph orch upgrade start --image ...` (or bump `ceph_version`) |
+| All role variables | — | Unchanged |
+| All cluster features | — | Unchanged |
+
+No data is moved, deleted, or reformatted during migration. OSD LVM metadata is
+preserved exactly. CephFS and RGW data are not touched.
+
+### Do all hosts need to migrate at the same time?
+
+**No.** Migration is incremental and rolling. The cluster continues serving I/O
+throughout. A cluster where some nodes are containerized and others are still
+running native packages is a normal intermediate state — the Ceph protocol is
+agnostic to how each daemon is launched.
+
+When you run the playbook against all nodes, the role automatically:
+- Sequences MON adoptions one at a time to maintain quorum
+- Adopts OSDs, MDS, and RGW across multiple nodes in parallel
+- Defers NFS migration until all other daemons are adopted
+- Skips any daemon already converted on a previous run
+
+You can also target a subset of nodes with `--limit` and the role picks up
+where it left off on the next full run.
+
+### Prerequisites
+
+Before starting, verify:
+
+1. **Cluster is healthy**: `ceph health` must return `HEALTH_OK`. Do not begin
+   migration with a degraded or recovering cluster.
+2. **All OSDs are up**: `ceph osd stat` — `num_up_osds` must equal `num_osds`.
+3. **Ceph version ≥ Octopus (v15)**: `ceph version`. Earlier releases do not
+   support `cephadm adopt`.
+4. **Set `ceph_version` to match what is currently installed**:
+   ```bash
+   ceph version   # e.g. "ceph version 19.2.0 ..."
+   ```
+   Then in your group vars:
+   ```yaml
+   ceph_version: "v19.2"   # must match major.minor of installed version
+   ```
+   The role asserts this match and fails early if it does not. This prevents
+   accidentally upgrading and migrating simultaneously.
+5. **Internet or mirror access**: All nodes must be able to pull the container
+   image (see *Using a private registry mirror* if needed).
+
+### Migration procedure
+
+**Step 1 — Add the new variables to your inventory**
+
+In your cluster group vars, add at minimum:
+```yaml
+ceph_version: "v19.2"          # match your currently installed version
+ceph_container_image: "quay.io/ceph/ceph"
+```
+
+All other new variables have safe defaults and are optional.
+
+**Step 2 — Run a dry-run check (optional but recommended)**
+
+```bash
+ansible-playbook deploy.yml --tags ceph --check
+```
+
+This will report what the role would do without making changes. Watch for any
+assertion failures from the version check or health check tasks.
+
+**Step 3 — Run the migration**
+
+```bash
+ansible-playbook deploy.yml --tags ceph
+```
+
+The role detects the legacy installation and runs the migration automatically.
+You do not need a separate migration playbook.
+
+What happens, in order:
+
+1. The `cephadm` system user is created on all nodes, SSH keys are distributed,
+   podman is installed, the container image is pre-pulled.
+2. Pre-flight checks run on the bootstrap node (health, OSD counts, version).
+3. The bootstrap MON and MGR are adopted into containers.
+4. The cephadm orchestrator is enabled and pointed at the `cephadm` SSH user.
+5. All cluster hosts are registered with the orchestrator.
+6. Remaining MONs are adopted one at a time with quorum verification between
+   each. This is the most time-sensitive sequence (~2 min per MON for a typical
+   node).
+7. MDS and RGW nodes are adopted in parallel across nodes.
+8. OSDs are adopted in parallel across nodes (~30 s per OSD).
+9. **NFS migration** (if used): all NFS nodes stop the legacy Ganesha service
+   simultaneously, the cephadm NFS container starts, and exports are recreated
+   via `ceph nfs export`. Client interruption target: under 5 minutes.
+10. Legacy packages are removed.
+11. CRUSH topology is validated and corrected where needed.
+12. Nice-level systemd overrides are applied to the new container service units.
+
+**Step 4 — Verify the migration**
+
+```bash
+ceph health
+ceph orch ps           # all daemons should show 'running'
+ceph osd stat          # same OSD count as before
+ceph fs status         # CephFS healthy
+ceph orch host ls      # all hosts registered
+```
+
+For NFS:
+```bash
+ceph nfs export ls <fs_name>    # exports present
+showmount -e <nfs_vip>          # exports visible from a client
+```
+
+### What to do if the migration stops partway
+
+The migration is re-entrant. If the playbook fails or is interrupted at any
+point, simply fix the underlying issue and re-run:
+
+```bash
+ansible-playbook deploy.yml --tags ceph
+```
+
+Already-migrated daemons are detected and skipped. The role resumes from
+where it stopped.
+
+If you want to check the state before re-running:
+```bash
+# Shows which daemons are cephadm-managed vs still legacy
+ceph orch ps                              # cephadm-managed daemons
+systemctl list-units 'ceph-[^@]*@*'       # legacy daemons (if any remain)
+```
+
+### There is no automated rollback
+
+Once `cephadm adopt` converts a daemon, reverting it to native packages is a
+manual process and not recommended. Verify `ceph health` is `HEALTH_OK` at
+each checkpoint before continuing to the next group of nodes. The pre-flight
+assertions at the start of each run enforce this automatically.
+
+### Upgrading Ceph version after migration
+
+After migration is complete, upgrade by bumping `ceph_version` in your group
+vars and re-running the playbook:
+
+```yaml
+ceph_version: "v19.3"   # or the next release
+```
+
+```bash
+ansible-playbook deploy.yml --tags ceph
+```
+
+The role detects that the deployed version differs from `ceph_version`, runs
+`ceph orch upgrade start --image quay.io/ceph/ceph:v19.3`, and polls until the
+upgrade is complete before proceeding. The upgrade is a rolling restart — no
+downtime for RBD or RGW; CephFS and NFS experience brief per-MDS pauses during
+MDS restarts.
+
+---
 
 ## Groups used by this role
 

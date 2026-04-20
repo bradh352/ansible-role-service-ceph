@@ -2,13 +2,11 @@
 - name: "Check required variables"
   ansible.builtin.fail:
     msg: "Must specify ceph_cluster_name, ceph_public_network, ceph_cluster_network, and ceph_uuid"
-  when: ceph_cluster_name is not defined or ceph_public_network is not defined or ceph_cluster_network is not defined or ceph_uuid is not defined
-
-- name: "APT: Install required packages"
-  ansible.builtin.apt:
-    pkg:
-      - ceph
-    state: present
+  when: >-
+    ceph_cluster_name is not defined or
+    ceph_public_network is not defined or
+    ceph_cluster_network is not defined or
+    ceph_uuid is not defined
 
 - name: "Gather ceph hosts"
   ansible.builtin.set_fact:
@@ -18,22 +16,129 @@
   ansible.builtin.set_fact:
     ceph_hosts: "{{ ceph_hosts_json | from_yaml }}"
 
+- name: "Build full list of all cluster nodes"
+  ansible.builtin.set_fact:
+    _ceph_all_nodes: >-
+      {{ (groups['ceph_' + ceph_cluster_name + '_mon'] | default([]) +
+          groups['ceph_' + ceph_cluster_name + '_osd'] | default([]) +
+          groups['ceph_' + ceph_cluster_name + '_mds'] | default([]) +
+          groups['ceph_' + ceph_cluster_name + '_rgw'] | default([]))
+         | unique | sort }}
+
 - name: "Add known ceph nodes to /etc/hosts"
   ansible.builtin.lineinfile:
     path: /etc/hosts
-    line: "{{ hostvars[item]['ceph_mon_ip'] }} {{ item | split('.') | first }} {{ item }}"
-  with_items: "{{ ceph_hosts | reject('search', inventory_hostname | split('.') | first ) }}"
+    line: >-
+      {{ hostvars[item]['ceph_mon_ip'] }} {{ item | split('.') | first }} {{ item }}
+  loop: >-
+    {{ ceph_hosts | reject('search', inventory_hostname | split('.') | first) }}
+  when: hostvars[item]['ceph_mon_ip'] is defined
 
-- name: Fixup ansible password for this playbook if it was changed in the base role
+- name: "Fixup ansible password for this playbook if it was changed in the base role"
   ansible.builtin.set_fact:
     ansible_password: "{{ superuser_password }}"
     ansible_become_pass: "{{ superuser_password }}"
   delegate_to: "{{ item }}"
   delegate_facts: true
   no_log: true
-  when: ansible_user == superuser and ((superuser_created is defined and superuser_created.changed) or (superuser_pwchanged is defined and
-    superuser_pwchanged.changed))
-  with_items: "{{ groups['ceph_' + ceph_cluster_name + '_mon']|unique|sort }}"
+  when: >-
+    ansible_user == superuser and
+    ((superuser_created is defined and superuser_created.changed) or
+     (superuser_pwchanged is defined and superuser_pwchanged.changed))
+  loop: "{{ groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort }}"
+
+# -----------------------------------------------------------------------
+# Deployment mode detection (Step 6)
+# -----------------------------------------------------------------------
+
+- name: "Detect cephadm-managed daemon units on this node"
+  ansible.builtin.find:
+    paths: /etc/systemd/system
+    patterns: "ceph-{{ ceph_uuid }}@*.service"
+  register: _cephadm_units
+
+- name: "Detect legacy MON data directory"
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/mon/ceph-{{ inventory_hostname | split('.') | first }}"
+  register: _legacy_mon_dir
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+
+- name: "Detect legacy OSD (ceph-volume LVM)"
+  ansible.builtin.command: ceph-volume lvm list --format json
+  register: _legacy_osd_list
+  failed_when: false
+  changed_when: false
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd']
+
+- name: "Detect legacy MDS data directory"
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/mds/ceph-{{ inventory_hostname | split('.') | first }}"
+  register: _legacy_mds_dir
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+
+- name: "Detect legacy RGW data directory"
+  ansible.builtin.stat:
+    path: "/var/lib/ceph/radosgw/ceph-rgw.{{ inventory_hostname | split('.') | first }}"
+  register: _legacy_rgw_dir
+  when: >-
+    groups['ceph_' + ceph_cluster_name + '_rgw'] is defined and
+    inventory_hostname in groups['ceph_' + ceph_cluster_name + '_rgw']
+
+- name: "Set per-daemon migration flags"
+  ansible.builtin.set_fact:
+    _cephadm_units_present: "{{ _cephadm_units.files | length > 0 }}"
+    _needs_mon_adopt: >-
+      {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] and
+         (_legacy_mon_dir.stat.exists | default(false)) and
+         not (_cephadm_units.files | map(attribute='path') | map('basename')
+              | select('match', 'ceph-' + ceph_uuid + '@mon\\..*\\.service')
+              | list | length > 0) }}
+    _needs_osd_adopt: >-
+      {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] and
+         ((_legacy_osd_list.stdout | default('{}', true)) | from_json | length > 0) and
+         not (_cephadm_units.files | map(attribute='path') | map('basename')
+              | select('match', 'ceph-' + ceph_uuid + '@osd\\..*\\.service')
+              | list | length > 0) }}
+    _needs_mds_adopt: >-
+      {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] and
+         (_legacy_mds_dir.stat.exists | default(false)) and
+         not (_cephadm_units.files | map(attribute='path') | map('basename')
+              | select('match', 'ceph-' + ceph_uuid + '@mds\\..*\\.service')
+              | list | length > 0) }}
+    _needs_rgw_adopt: >-
+      {{ groups['ceph_' + ceph_cluster_name + '_rgw'] is defined and
+         inventory_hostname in groups['ceph_' + ceph_cluster_name + '_rgw'] and
+         (_legacy_rgw_dir.stat.exists | default(false)) and
+         not (_cephadm_units.files | map(attribute='path') | map('basename')
+              | select('match', 'ceph-' + ceph_uuid + '@rgw\\..*\\.service')
+              | list | length > 0) }}
+
+- name: "Compute cluster-wide deployment mode"
+  ansible.builtin.set_fact:
+    _cluster_mode: >-
+      {%- set any_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+            | map('extract', hostvars)
+            | map(attribute='_needs_mon_adopt', default=false)
+            | select | list | length > 0 -%}
+      {%- set any_cephadm = groups['ceph_' + ceph_cluster_name + '_mon']
+            | map('extract', hostvars)
+            | map(attribute='_cephadm_units_present', default=false)
+            | select | list | length > 0 -%}
+      {%- if any_legacy -%}legacy
+      {%- elif any_cephadm -%}cephadm
+      {%- else -%}fresh{%- endif -%}
+  run_once: true
+
+- name: "Broadcast deployment mode to all hosts"
+  ansible.builtin.set_fact:
+    ceph_deployment_mode: >-
+      {{ hostvars[groups['ceph_' + ceph_cluster_name + '_mon'] | sort | first]['_cluster_mode'] }}
+
+# -----------------------------------------------------------------------
+# Bootstrap node election
+# For cephadm/fresh: first sorted MON (admin keyring may not exist yet)
+# For legacy: existing keyring-based election (preserved from original)
+# -----------------------------------------------------------------------
 
 - name: "Determine nodes which are initialized with Admin keyring"
   ansible.builtin.stat:
@@ -44,7 +149,7 @@
   failed_when: false
   changed_when: false
   register: ceph_nodes_adminkeyring
-  with_items: "{{ groups['ceph_' + ceph_cluster_name + '_mon']|unique|sort }}"
+  loop: "{{ groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort }}"
 
 - name: "Determine nodes which are initialized with OSD keyring"
   ansible.builtin.stat:
@@ -55,28 +160,31 @@
   failed_when: false
   changed_when: false
   register: ceph_nodes_osdkeyring
-  with_items: "{{ groups['ceph_' + ceph_cluster_name + '_mon']|unique|sort }}"
+  loop: "{{ groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort }}"
 
-- name: "Determine which node to use for boostrapping"
+- name: "Determine which node to use for bootstrapping"
   ansible.builtin.set_fact:
     ceph_bootstrap_node: >-
-      {%- set eligible_adminkeyring_hosts = [] %}
-      {%- set eligible_osdkeyring_hosts = [] %}
-      {%- for node in ceph_nodes_adminkeyring.results %}
-      {%-   if node.stat.exists | default(false) %}
-      {%-     do eligible_adminkeyring_hosts.append(node.item) %}
-      {%-   endif %}
-      {%- endfor %}
-      {%- for node in ceph_nodes_osdkeyring.results %}
-      {%-   if node.stat.exists | default(false) %}
-      {%-     do eligible_osdkeyring_hosts.append(node.item) %}
-      {%-   endif %}
-      {%- endfor %}
-      {%- set eligible_hosts = eligible_adminkeyring_hosts | intersect(eligible_osdkeyring_hosts) | unique | sort %}
-      {%- if eligible_hosts | length == 0 %}
-      {%-   do eligible_hosts.append(groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort | first) %}
-      {%- endif %}
-      {{- eligible_hosts[0] -}}
+      {%- if ceph_deployment_mode in ['cephadm', 'fresh'] -%}
+        {{ groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort | first }}
+      {%- else -%}
+        {%- set ns = namespace(eligible_admin=[], eligible_osd=[]) -%}
+        {%- for node in ceph_nodes_adminkeyring.results -%}
+          {%- if node.stat.exists | default(false) -%}
+            {%- set ns.eligible_admin = ns.eligible_admin + [node.item] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- for node in ceph_nodes_osdkeyring.results -%}
+          {%- if node.stat.exists | default(false) -%}
+            {%- set ns.eligible_osd = ns.eligible_osd + [node.item] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- set eligible = ns.eligible_admin | intersect(ns.eligible_osd) | unique | sort -%}
+        {%- if eligible | length == 0 -%}
+          {%- set eligible = [groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort | first] -%}
+        {%- endif -%}
+        {{ eligible[0] }}
+      {%- endif -%}
 
 - name: "See if we have the client admin keyring installed"
   ansible.builtin.stat:
@@ -88,63 +196,170 @@
     path: /var/lib/ceph/bootstrap-osd/ceph.keyring
   register: osd_keyring
 
-- name: "Check to see if we need to bootstrap"
+- name: "Check to see if we need to bootstrap (fresh path only)"
   ansible.builtin.set_fact:
-    ceph_bootstrap: "{{ true if (not admin_keyring.stat.exists or not osd_keyring.stat.exists) and inventory_hostname == ceph_bootstrap_node else false }}"
+    ceph_bootstrap: >-
+      {{ ceph_deployment_mode == 'fresh' and
+         (not admin_keyring.stat.exists or not osd_keyring.stat.exists) and
+         inventory_hostname == ceph_bootstrap_node }}
 
-- name: "Create ceph.conf"
-  ansible.builtin.template:
-    src: ceph.conf.j2
-    dest: "/etc/ceph/ceph.conf"
-    mode: "660"
-    owner: ceph
+# -----------------------------------------------------------------------
+# NFS exports fact (used throughout)
+# -----------------------------------------------------------------------
+
+- name: "Determine which filesystems have NFS exports"
+  ansible.builtin.set_fact:
+    ceph_nfs_exports: >-
+      {{ ceph_fs | default([])
+         | selectattr('nfs', 'defined')
+         | selectattr('nfs', 'equalto', true)
+         | map(attribute='name') | list }}
+
+# -----------------------------------------------------------------------
+# Phase 1: Prerequisites (all nodes)
+# -----------------------------------------------------------------------
+
+- name: "Cephadm prerequisites: user, SSH, sudo, podman, binary, image pull"
+  ansible.builtin.import_tasks: cephadm-prereqs.yml
+
+# -----------------------------------------------------------------------
+# Phase 2: Version check / upgrade (bootstrap node)
+# -----------------------------------------------------------------------
+
+- name: "Version check and upgrade orchestration"
+  ansible.builtin.import_tasks: cephadm-version.yml
+  when: inventory_hostname == ceph_bootstrap_node
+
+# -----------------------------------------------------------------------
+# Phase 3a: Legacy migration path
+# -----------------------------------------------------------------------
+
+- name: "Migrate legacy cluster to cephadm"
+  ansible.builtin.import_tasks: cephadm-migrate.yml
+  when: ceph_deployment_mode == 'legacy'
+
+# -----------------------------------------------------------------------
+# Phase 3b: Fresh install bootstrap
+# -----------------------------------------------------------------------
 
 - name: "Bootstrap new cluster"
-  ansible.builtin.import_tasks: "ceph-mon-bootstrap.yml"
-  when: ceph_bootstrap
+  ansible.builtin.import_tasks: cephadm-bootstrap.yml
+  when:
+    - ceph_deployment_mode == 'fresh'
+    - inventory_hostname == ceph_bootstrap_node
 
-- name: "Fetch the client admin keyring"
+# -----------------------------------------------------------------------
+# Admin keyring distribution (fresh path: after bootstrap)
+# -----------------------------------------------------------------------
+
+- name: "Fetch the client admin keyring from bootstrap node"
   ansible.builtin.command: base64 /etc/ceph/ceph.client.admin.keyring
   register: admin_keyring_data
-  when: not ceph_bootstrap and not admin_keyring.stat.exists
+  changed_when: false
+  when:
+    - ceph_deployment_mode == 'fresh'
+    - not ceph_bootstrap
+    - not admin_keyring.stat.exists
   delegate_to: "{{ ceph_bootstrap_node }}"
 
-- name: "Install the client admin keyring"
+- name: "Install the client admin keyring on other MON nodes"
   ansible.builtin.copy:
-    dest: "/etc/ceph/ceph.client.admin.keyring"
+    dest: /etc/ceph/ceph.client.admin.keyring
     content: "{{ admin_keyring_data.stdout | b64decode }}"
-    mode: "660"
-    owner: ceph
-  when: not ceph_bootstrap and not admin_keyring.stat.exists
+    mode: "0640"
+    owner: root
+    group: root
+  when:
+    - ceph_deployment_mode == 'fresh'
+    - not ceph_bootstrap
+    - not admin_keyring.stat.exists
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
 
-- name: "Configure monitor"
-  ansible.builtin.import_tasks: "ceph-mon.yml"
-  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mon"]
+# -----------------------------------------------------------------------
+# Global cluster config (bootstrap node, all paths)
+# -----------------------------------------------------------------------
 
-- name: "Configure mds"
-  ansible.builtin.import_tasks: "ceph-mds.yml"
-  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mds"]
+- name: "Apply global ceph config"
+  ansible.builtin.import_tasks: cephadm-config.yml
+  when: inventory_hostname == ceph_bootstrap_node
 
-- name: "Configure osd"
-  ansible.builtin.import_tasks: "ceph-osd.yml"
-  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_osd"]
+# -----------------------------------------------------------------------
+# Host registration + service specs (fresh and cephadm paths)
+# -----------------------------------------------------------------------
+
+- name: "Register hosts and labels with orchestrator"
+  ansible.builtin.import_tasks: cephadm-hosts.yml
+  when:
+    - ceph_deployment_mode != 'legacy'
+    - inventory_hostname == ceph_bootstrap_node
+
+- name: "Apply service specs"
+  ansible.builtin.import_tasks: cephadm-services.yml
+  when:
+    - ceph_deployment_mode != 'legacy'
+    - inventory_hostname == ceph_bootstrap_node
+
+# -----------------------------------------------------------------------
+# Pools, CephFS (bootstrap node)
+# -----------------------------------------------------------------------
 
 - name: "Configure pools"
-  ansible.builtin.import_tasks: "ceph-pools.yml"
-  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mon"]
+  ansible.builtin.import_tasks: ceph-pools.yml
+  when:
+    - ceph_pools is defined
+    - ceph_pools | length > 0
+    - inventory_hostname == ceph_bootstrap_node
 
 - name: "Configure filesystems"
-  ansible.builtin.import_tasks: "ceph-fs.yml"
-  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mon"]
+  ansible.builtin.import_tasks: ceph-fs.yml
+  when:
+    - ceph_fs is defined
+    - ceph_fs | length > 0
+    - inventory_hostname == ceph_bootstrap_node
 
-- name: "See if NFS is desired"
-  ansible.builtin.set_fact:
-    ceph_nfs_exports: "{{ ceph_fs | default([]) | selectattr('nfs', 'defined') | selectattr('nfs', 'equalto', true) | map(attribute='name') | list }}"
+# -----------------------------------------------------------------------
+# NFS (bootstrap node)
+# -----------------------------------------------------------------------
 
-- name: "Configure nfs"
-  ansible.builtin.import_tasks: "ceph-nfs.yml"
-  when: inventory_hostname in groups["ceph_" + ceph_cluster_name + "_mds"] and ceph_nfs_exports | length > 0
+- name: "Configure NFS exports"
+  ansible.builtin.import_tasks: cephadm-nfs.yml
+  when:
+    - ceph_nfs_exports | length > 0
+    - inventory_hostname == ceph_bootstrap_node
 
-- name: "Configure RGW"
-  ansible.builtin.import_tasks: "ceph-rgw.yml"
-  when: groups["ceph_" + ceph_cluster_name + "_rgw"] is defined and inventory_hostname in groups["ceph_" + ceph_cluster_name + "_rgw"]
+# -----------------------------------------------------------------------
+# RGW (bootstrap node)
+# -----------------------------------------------------------------------
+
+- name: "Configure RGW zone"
+  ansible.builtin.import_tasks: cephadm-rgw.yml
+  when:
+    - groups['ceph_' + ceph_cluster_name + '_rgw'] is defined
+    - groups['ceph_' + ceph_cluster_name + '_rgw'] | length > 0
+    - ceph_rgw is defined
+    - inventory_hostname == ceph_bootstrap_node
+
+# -----------------------------------------------------------------------
+# CRUSH topology (bootstrap node)
+# -----------------------------------------------------------------------
+
+- name: "Validate and apply CRUSH topology"
+  ansible.builtin.import_tasks: cephadm-crush.yml
+  when: inventory_hostname == ceph_bootstrap_node
+
+# -----------------------------------------------------------------------
+# Nice levels (all nodes)
+# -----------------------------------------------------------------------
+
+- name: "Apply systemd Nice= overrides to containerized daemons"
+  ansible.builtin.import_tasks: cephadm-nice.yml
+
+# -----------------------------------------------------------------------
+# Prometheus (bootstrap node, optional)
+# -----------------------------------------------------------------------
+
+- name: "Configure Prometheus metrics"
+  ansible.builtin.import_tasks: cephadm-prometheus.yml
+  when:
+    - ceph_prometheus
+    - inventory_hostname == ceph_bootstrap_node

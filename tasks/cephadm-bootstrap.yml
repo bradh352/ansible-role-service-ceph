@@ -1,0 +1,35 @@
+---
+- name: "Bootstrap: check if cluster is already bootstrapped"
+  ansible.builtin.stat:
+    path: /etc/ceph/ceph.client.admin.keyring
+  register: _bootstrap_keyring_check
+
+- name: "Bootstrap: run cephadm bootstrap"
+  ansible.builtin.command: >
+    cephadm bootstrap
+    --mon-ip {{ ceph_mon_ip }}
+    --cluster-network {{ ceph_cluster_network }}
+    --fsid {{ ceph_uuid }}
+    --ssh-user {{ ceph_cephadm_user }}
+    --ssh-private-key /home/{{ ceph_cephadm_user }}/.ssh/id_ed25519
+    --ssh-public-key /home/{{ ceph_cephadm_user }}/.ssh/id_ed25519.pub
+    --image {{ ceph_container_image }}:{{ ceph_version }}
+    --skip-pull
+    --skip-dashboard
+    --output-keyring /etc/ceph/ceph.client.admin.keyring
+    --output-config /etc/ceph/ceph.conf
+  when: not _bootstrap_keyring_check.stat.exists
+  changed_when: not _bootstrap_keyring_check.stat.exists
+
+- name: "Bootstrap: enable msgr2"
+  ansible.builtin.command: ceph mon enable-msgr2
+  changed_when: false
+  when: not _bootstrap_keyring_check.stat.exists
+
+- name: "Bootstrap: wait for cluster to be healthy"
+  ansible.builtin.command: ceph health --format json
+  register: _health
+  until: (_health.stdout | from_json).status in ['HEALTH_OK', 'HEALTH_WARN']
+  retries: 30
+  delay: 10
+  changed_when: false

@@ -1,0 +1,52 @@
+---
+- name: "Get currently registered hosts from orchestrator"
+  ansible.builtin.command: ceph orch host ls --format json
+  register: _orch_hosts
+  changed_when: false
+
+- name: "Build set of already-registered hostnames"
+  ansible.builtin.set_fact:
+    _registered_hosts: >-
+      {{ _orch_hosts.stdout | from_json | map(attribute='hostname') | list }}
+
+- name: "Add hosts to cephadm orchestrator"
+  ansible.builtin.command: >
+    ceph orch host add
+    {{ item | split('.') | first }}
+    {{ hostvars[item].ceph_mon_ip | default(hostvars[item].ansible_host) }}
+  loop: "{{ _ceph_all_nodes }}"
+  when: (item | split('.') | first) not in _registered_hosts
+  changed_when: true
+
+- name: "Apply host labels based on group membership"
+  ansible.builtin.command: >
+    ceph orch host label add
+    {{ item.host | split('.') | first }}
+    {{ item.label }}
+  loop: "{{ _host_labels }}"
+  vars:
+    _host_labels: >-
+      {%- set ns = namespace(labels=[]) -%}
+      {%- set mon_group = 'ceph_' + ceph_cluster_name + '_mon' -%}
+      {%- set osd_group = 'ceph_' + ceph_cluster_name + '_osd' -%}
+      {%- set mds_group = 'ceph_' + ceph_cluster_name + '_mds' -%}
+      {%- set rgw_group = 'ceph_' + ceph_cluster_name + '_rgw' -%}
+      {%- for h in _ceph_all_nodes -%}
+        {%- if h in groups[mon_group] | default([]) -%}
+          {%- set ns.labels = ns.labels + [{'host': h, 'label': 'mon'}, {'host': h, 'label': 'mgr'}] -%}
+        {%- endif -%}
+        {%- if h in groups[osd_group] | default([]) -%}
+          {%- set ns.labels = ns.labels + [{'host': h, 'label': 'osd'}] -%}
+        {%- endif -%}
+        {%- if h in groups[mds_group] | default([]) -%}
+          {%- set ns.labels = ns.labels + [{'host': h, 'label': 'mds'}] -%}
+          {%- if ceph_nfs_exports | length > 0 -%}
+            {%- set ns.labels = ns.labels + [{'host': h, 'label': 'nfs'}] -%}
+          {%- endif -%}
+        {%- endif -%}
+        {%- if groups[rgw_group] is defined and h in groups[rgw_group] -%}
+          {%- set ns.labels = ns.labels + [{'host': h, 'label': 'rgw'}] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.labels }}
+  changed_when: false

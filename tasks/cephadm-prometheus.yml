@@ -1,0 +1,28 @@
+---
+- name: "Check if prometheus mgr module is enabled"
+  ansible.builtin.command: ceph mgr module ls --format json
+  register: _mgr_modules
+  changed_when: false
+
+- name: "Enable prometheus mgr module"
+  ansible.builtin.command: ceph mgr module enable prometheus
+  when: >-
+    (_mgr_modules.stdout | from_json).enabled_modules is not defined or
+    'prometheus' not in (_mgr_modules.stdout | from_json).enabled_modules
+  changed_when: true
+
+- name: "Configure prometheus to export all perf counters and rbd stats"
+  ansible.builtin.command: >
+    ceph config set mgr {{ item.key }} {{ item.value }}
+  loop:
+    - {key: "mgr/prometheus/exclude_perf_counters", value: "false"}
+    - {key: "mgr/prometheus/rbd_stats_pools", value: "*"}
+  changed_when: false
+
+- name: "UFW: Allow prometheus port on mon nodes"
+  community.general.ufw:
+    rule: allow
+    port: "9283"
+    proto: tcp
+    dest: "{{ ceph_mon_ip }}"
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']

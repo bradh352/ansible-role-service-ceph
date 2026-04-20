@@ -1,4 +1,12 @@
 ---
+- name: "Wait for at least one OSD to be available"
+  ansible.builtin.command: ceph osd stat --format json
+  register: _pools_osd_stat
+  until: (_pools_osd_stat.stdout | from_json).num_up_osds | default(0) | int > 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
 - name: "Retrieve ceph pools"
   ansible.builtin.command: "ceph osd pool ls -f json"
   register: ceph_existing_pools

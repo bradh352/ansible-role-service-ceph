@@ -1,0 +1,6 @@
+---
+- name: "Validate and apply CRUSH topology for each OSD node"
+  ansible.builtin.include_tasks: cephadm-crush-node.yml
+  loop: "{{ groups['ceph_' + ceph_cluster_name + '_osd'] | unique | sort }}"
+  loop_control:
+    loop_var: _crush_host

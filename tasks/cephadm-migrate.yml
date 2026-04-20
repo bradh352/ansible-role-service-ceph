@@ -1,0 +1,385 @@
+---
+# -----------------------------------------------------------------------
+# Pre-flight checks — run once on bootstrap node
+# -----------------------------------------------------------------------
+
+- name: "Migration: check cluster health before starting"
+  ansible.builtin.command: ceph health --format json
+  register: _preflight_health
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Migration: assert cluster is healthy"
+  ansible.builtin.assert:
+    that: (_preflight_health.stdout | from_json).status == 'HEALTH_OK'
+    fail_msg: >-
+      Cluster health is {{ (_preflight_health.stdout | from_json).status }}.
+      Resolve cluster issues before migrating.
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Migration: check all OSDs are up"
+  ansible.builtin.command: ceph osd stat --format json
+  register: _osd_stat
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Migration: assert all OSDs are up"
+  ansible.builtin.assert:
+    that: >-
+      (_osd_stat.stdout | from_json).num_up_osds ==
+      (_osd_stat.stdout | from_json).num_osds
+    fail_msg: >-
+      Not all OSDs are up: {{ (_osd_stat.stdout | from_json).num_up_osds }} /
+      {{ (_osd_stat.stdout | from_json).num_osds }}.
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+# -----------------------------------------------------------------------
+# Adopt bootstrap MON + MGR
+# -----------------------------------------------------------------------
+
+- name: "Migration: adopt bootstrap MON daemon"
+  ansible.builtin.command: >
+    cephadm adopt --style legacy --name
+    mon.{{ ceph_bootstrap_node | split('.') | first }} --skip-pull
+  when:
+    - inventory_hostname == ceph_bootstrap_node
+    - _needs_mon_adopt | default(false)
+  changed_when: true
+
+- name: "Migration: adopt bootstrap MGR daemon"
+  ansible.builtin.command: >
+    cephadm adopt --style legacy --name
+    mgr.{{ ceph_bootstrap_node | split('.') | first }} --skip-pull
+  when:
+    - inventory_hostname == ceph_bootstrap_node
+    - _needs_mon_adopt | default(false)
+  changed_when: true
+
+- name: "Migration: wait for quorum after bootstrap MON adoption"
+  ansible.builtin.command: ceph quorum_status --format json
+  register: _bootstrap_quorum
+  until: >-
+    (_bootstrap_quorum.stdout | from_json).quorum | length >=
+    (groups['ceph_' + ceph_cluster_name + '_mon'] | length // 2 + 1)
+  retries: 30
+  delay: 10
+  changed_when: false
+  when:
+    - inventory_hostname == ceph_bootstrap_node
+    - _needs_mon_adopt | default(false)
+
+# -----------------------------------------------------------------------
+# Enable cephadm orchestrator (idempotent)
+# -----------------------------------------------------------------------
+
+- name: "Migration: check if cephadm orchestrator already active"
+  ansible.builtin.command: ceph orch status --format json
+  register: _orch_status
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  failed_when: false
+
+- name: "Migration: enable cephadm mgr module"
+  ansible.builtin.command: ceph mgr module enable cephadm
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  when: >-
+    (_orch_status.stdout | default('{}') | from_json).backend | default('') != 'cephadm'
+  changed_when: true
+
+- name: "Migration: set orchestrator backend to cephadm"
+  ansible.builtin.command: ceph orch set backend cephadm
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  when: >-
+    (_orch_status.stdout | default('{}') | from_json).backend | default('') != 'cephadm'
+  changed_when: true
+
+- name: "Migration: configure cephadm SSH user"
+  ansible.builtin.command: >
+    ceph cephadm set-user {{ ceph_cephadm_user }}
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: false
+
+- name: "Migration: configure cephadm SSH private key"
+  ansible.builtin.shell: >
+    ceph cephadm set-priv-key
+    -i /home/{{ ceph_cephadm_user }}/.ssh/id_ed25519
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: false
+
+- name: "Migration: configure cephadm SSH public key"
+  ansible.builtin.shell: >
+    ceph cephadm set-pub-key
+    -i /home/{{ ceph_cephadm_user }}/.ssh/id_ed25519.pub
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: false
+
+# -----------------------------------------------------------------------
+# Register all hosts with orchestrator
+# -----------------------------------------------------------------------
+
+- name: "Migration: get registered hosts"
+  ansible.builtin.command: ceph orch host ls --format json
+  register: _migrate_orch_hosts
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Migration: add hosts to orchestrator"
+  ansible.builtin.command: >
+    ceph orch host add
+    {{ item | split('.') | first }}
+    {{ hostvars[item].ceph_mon_ip | default(hostvars[item].ansible_host) }}
+  loop: "{{ _ceph_all_nodes }}"
+  when: >-
+    (item | split('.') | first) not in
+    (_migrate_orch_hosts.stdout | from_json | map(attribute='hostname') | list)
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: true
+
+# -----------------------------------------------------------------------
+# Adopt remaining MON + MGR nodes (sequential to preserve quorum)
+# -----------------------------------------------------------------------
+
+- name: "Migration: build list of remaining MON nodes needing adoption"
+  ansible.builtin.set_fact:
+    _mons_to_adopt: >-
+      {%- set ns = namespace(mons=[]) -%}
+      {%- for host in groups['ceph_' + ceph_cluster_name + '_mon'] | sort -%}
+        {%- if host != ceph_bootstrap_node and
+               hostvars[host]['_needs_mon_adopt'] | default(false) -%}
+          {%- set ns.mons = ns.mons + [host] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.mons }}
+  run_once: true
+
+- name: "Migration: adopt remaining MON nodes one at a time"
+  ansible.builtin.include_tasks: cephadm-migrate-mon-step.yml
+  loop: "{{ _mons_to_adopt }}"
+  loop_control:
+    loop_var: _mon_to_adopt
+  run_once: true
+
+# -----------------------------------------------------------------------
+# Adopt MDS daemons (per node, parallel across nodes)
+# -----------------------------------------------------------------------
+
+- name: "Migration: adopt MDS daemon on this node"
+  ansible.builtin.command: >
+    cephadm adopt --style legacy --name
+    mds.{{ inventory_hostname | split('.') | first }} --skip-pull
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+    - _needs_mds_adopt | default(false)
+  changed_when: true
+
+# -----------------------------------------------------------------------
+# Adopt RGW daemons (per node, parallel across nodes)
+# -----------------------------------------------------------------------
+
+- name: "Migration: adopt RGW daemon on this node"
+  ansible.builtin.command: >
+    cephadm adopt --style legacy --name
+    rgw.{{ inventory_hostname | split('.') | first }} --skip-pull
+  when:
+    - groups['ceph_' + ceph_cluster_name + '_rgw'] is defined
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_rgw']
+    - _needs_rgw_adopt | default(false)
+  changed_when: true
+
+# -----------------------------------------------------------------------
+# Adopt OSD daemons (per node, parallel across nodes)
+# -----------------------------------------------------------------------
+
+- name: "Migration: get legacy OSD list on this node"
+  ansible.builtin.command: ceph-volume lvm list --format json
+  register: _node_osd_list
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd']
+    - _needs_osd_adopt | default(false)
+
+- name: "Migration: adopt each legacy OSD on this node"
+  ansible.builtin.command: >
+    cephadm adopt --style legacy --name osd.{{ item }} --skip-pull
+  loop: >-
+    {{ (_node_osd_list.stdout | default('{}') | from_json).keys() | list }}
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd']
+    - _needs_osd_adopt | default(false)
+    - _node_osd_list is not skipped
+  changed_when: true
+
+- name: "Migration: verify OSD count unchanged after adoption"
+  ansible.builtin.command: ceph osd stat --format json
+  register: _post_osd_stat
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  when: _needs_osd_adopt | default(false)
+
+- name: "Migration: assert OSD count matches pre-migration count"
+  ansible.builtin.assert:
+    that: >-
+      (_post_osd_stat.stdout | from_json).num_osds ==
+      (_osd_stat.stdout | from_json).num_osds
+    fail_msg: >-
+      OSD count changed during migration!
+      Before: {{ (_osd_stat.stdout | from_json).num_osds }}
+      After:  {{ (_post_osd_stat.stdout | from_json).num_osds }}
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  when: _needs_osd_adopt | default(false)
+
+# -----------------------------------------------------------------------
+# NFS migration — deferred until all other daemons are adopted
+# -----------------------------------------------------------------------
+
+- name: "Migration: check if any NFS migration is still needed"
+  ansible.builtin.set_fact:
+    _any_nfs_needed: >-
+      {{ groups['ceph_' + ceph_cluster_name + '_mds'] | default([])
+         | map('extract', hostvars, ['_needs_mds_adopt'])
+         | select | list | length == 0 and
+         ceph_nfs_exports | length > 0 }}
+  run_once: true
+
+- name: "Migration: check if legacy NFS-Ganesha is running"
+  ansible.builtin.command: systemctl is-active nfs-ganesha  # noqa: command-instead-of-module
+  register: _nfs_ganesha_active
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+    - _any_nfs_needed | default(false)
+
+- name: "Migration: create NFS cluster via cephadm"
+  ansible.builtin.command: >
+    ceph nfs cluster create {{ item.name }} "label:nfs"
+  loop: "{{ ceph_fs | default([]) }}"
+  when:
+    - item.nfs | default(false)
+    - _any_nfs_needed | default(false)
+    - inventory_hostname == ceph_bootstrap_node
+  run_once: true
+  failed_when: false
+  changed_when: true
+
+- name: "Migration: stop legacy NFS-Ganesha on all NFS nodes simultaneously"
+  ansible.builtin.service:
+    name: nfs-ganesha
+    state: stopped
+    enabled: false
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+    - _any_nfs_needed | default(false)
+    - _nfs_ganesha_active.rc | default(1) == 0
+
+- name: "Migration: wait for NFS containers to come up"
+  ansible.builtin.command: ceph orch ps --daemon-type nfs --format json
+  register: _nfs_migrate_ps
+  until: >-
+    (_nfs_migrate_ps.stdout | from_json | length > 0) and
+    (_nfs_migrate_ps.stdout | from_json
+     | selectattr('status_desc', 'equalto', 'running') | list | length ==
+     _nfs_migrate_ps.stdout | from_json | length)
+  retries: 60
+  delay: 10
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  when: _any_nfs_needed | default(false)
+
+- name: "Migration: recreate CephFS subtrees for NFS"
+  ansible.builtin.shell: |
+    set -e
+    mkdir -p /mnt/cephfs-temp
+    mount -t ceph "admin@.{{ item.name }}=/" /mnt/cephfs-temp
+    mkdir -p "/mnt/cephfs-temp/{{ item.nfs_root }}"
+    chmod 777 "/mnt/cephfs-temp/{{ item.nfs_root }}"
+    umount /mnt/cephfs-temp
+    rm -rf /mnt/cephfs-temp
+  loop: "{{ ceph_fs | default([]) }}"
+  when:
+    - item.nfs | default(false)
+    - item.nfs_root is defined
+    - _any_nfs_needed | default(false)
+    - inventory_hostname == ceph_bootstrap_node
+  run_once: true
+  changed_when: false
+
+- name: "Migration: recreate NFS exports via cephadm"
+  ansible.builtin.include_tasks: cephadm-nfs-export.yml
+  loop: "{{ ceph_fs | default([]) }}"
+  loop_control:
+    loop_var: _nfs_fs
+  when:
+    - _nfs_fs.nfs | default(false)
+    - _any_nfs_needed | default(false)
+    - inventory_hostname == ceph_bootstrap_node
+  run_once: true
+
+- name: "Migration: remove legacy NFS packages"
+  ansible.builtin.apt:
+    name:
+      - nfs-ganesha
+      - nfs-ganesha-ceph
+    state: absent
+    purge: true
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+    - _any_nfs_needed | default(false)
+
+- name: "Migration: remove legacy ganesha.conf"
+  ansible.builtin.file:
+    path: /etc/ganesha/ganesha.conf
+    state: absent
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+    - _any_nfs_needed | default(false)
+
+# -----------------------------------------------------------------------
+# Remove legacy Ceph packages (after all daemons adopted + healthy)
+# -----------------------------------------------------------------------
+
+- name: "Migration: verify cluster health before removing packages"
+  ansible.builtin.command: ceph health --format json
+  register: _post_migrate_health
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Migration: assert cluster healthy before package removal"
+  ansible.builtin.assert:
+    that: (_post_migrate_health.stdout | from_json).status in ['HEALTH_OK', 'HEALTH_WARN']
+    fail_msg: "Cluster unhealthy after daemon adoption — not removing packages."
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Migration: check if legacy ceph package still installed"
+  ansible.builtin.command: dpkg-query -W -f='${Status}' ceph
+  register: _ceph_pkg_status
+  changed_when: false
+  failed_when: false
+
+- name: "Migration: remove legacy ceph and radosgw packages"
+  ansible.builtin.apt:
+    name:
+      - ceph
+      - radosgw
+    state: absent
+    purge: true
+    autoremove: true
+  when: "'install ok installed' in _ceph_pkg_status.stdout | default('')"
