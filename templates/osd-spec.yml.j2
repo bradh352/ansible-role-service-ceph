@@ -5,8 +5,8 @@ placement:
   label: osd
 spec:
   data_devices:
-    min_size: {{ ceph_osd_min_size }}
+    size: '{{ ceph_osd_min_size // 1024 // 1024 // 1024 }}G:'
 {% if ceph_osd_rotational is not none %}
-    rotational: {{ ceph_osd_rotational | bool | lower }}
+    rotational: {{ '1' if ceph_osd_rotational else '0' }}
 {% endif %}
   filter_logic: AND

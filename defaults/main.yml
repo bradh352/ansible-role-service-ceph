@@ -3,7 +3,7 @@ ceph_default_pool_size: 3
 ceph_default_min_pool_size: 2
 ceph_prometheus: false
 
-ceph_version: "v19.2"
+ceph_version: "19.2.3"
 ceph_container_image: "quay.io/ceph/ceph"
 ceph_cephadm_user: "cephadm"
 ceph_osd_min_size: 1099511627776

@@ -94,11 +94,11 @@ installations and migration from legacy native-package installations.
 This role deploys Ceph using **cephadm** — Ceph's container-based management
 framework. All daemons run as OCI containers managed by podman.
 
-* `ceph_version`: The Ceph version tag to deploy, e.g. `v19.2`. On a new
+* `ceph_version`: The Ceph version tag to deploy, e.g. `19.2.3`. On a new
   cluster this controls what image is pulled. On an existing cephadm-managed
   cluster, **changing this value triggers a rolling upgrade** via
   `ceph orch upgrade`. Do not change this at the same time as migrating from
-  native packages — migrate first, upgrade separately. Default: `v19.2`.
+  native packages — migrate first, upgrade separately. Default: `19.2.3`.
 * `ceph_container_image`: Container image path, without the tag. Default:
   `quay.io/ceph/ceph`. Override this when using a private registry mirror
   (see *Using a private registry mirror* below).
@@ -189,11 +189,11 @@ Before starting, verify:
    support `cephadm adopt`.
 4. **Set `ceph_version` to match what is currently installed**:
    ```bash
-   ceph version   # e.g. "ceph version 19.2.0 ..."
+   ceph version   # e.g. "ceph version 19.2.3 ..."
    ```
    Then in your group vars:
    ```yaml
-   ceph_version: "v19.2"   # must match major.minor of installed version
+   ceph_version: "19.2.3"   # must match major.minor.rel of installed version
    ```
    The role asserts this match and fails early if it does not. This prevents
    accidentally upgrading and migrating simultaneously.
@@ -206,7 +206,7 @@ Before starting, verify:
 
 In your cluster group vars, add at minimum:
 ```yaml
-ceph_version: "v19.2"          # match your currently installed version
+ceph_version: "19.2.3"          # match your currently installed version
 ceph_container_image: "quay.io/ceph/ceph"
 ```
 
@@ -298,7 +298,7 @@ After migration is complete, upgrade by bumping `ceph_version` in your group
 vars and re-running the playbook:
 
 ```yaml
-ceph_version: "v19.3"   # or the next release
+ceph_version: "20.0.1"   # or the next release
 ```
 
 ```bash
@@ -306,7 +306,7 @@ ansible-playbook deploy.yml --tags ceph
 ```
 
 The role detects that the deployed version differs from `ceph_version`, runs
-`ceph orch upgrade start --image quay.io/ceph/ceph:v19.3`, and polls until the
+`ceph orch upgrade start --image quay.io/ceph/ceph:v20.0.1`, and polls until the
 upgrade is complete before proceeding. The upgrade is a rolling restart — no
 downtime for RBD or RGW; CephFS and NFS experience brief per-MDS pauses during
 MDS restarts.

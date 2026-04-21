@@ -35,7 +35,7 @@
     ceph-authtool /tmp/ceph.mon.keyring --import-keyring /etc/ceph/ceph.client.admin.keyring
     ceph-authtool /tmp/ceph.mon.keyring --import-keyring /var/lib/ceph/bootstrap-osd/ceph.keyring
 - name: Generate monitor map
-  ansible.builtin.command: monmaptool --create --add {{ inventory_hostname | split('.') | first }} {{ ceph_mon_ip }} --fsid {{ ceph_uuid }} /tmp/monmap
+  ansible.builtin.command: monmaptool --create --add {{ inventory_hostname | split('.') | first }} {{ ceph_mon_ip }} --fsid {{ ceph_uuid | lower }} /tmp/monmap
 - name: Set ownership properly on created files
   ansible.builtin.file:
     path: "{{ item }}"

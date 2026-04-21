@@ -1,0 +1,88 @@
+---
+
+# -----------------------------------------------------------------------
+# NFS migration — deferred until all other daemons are adopted
+# -----------------------------------------------------------------------
+
+- name: "Migration: check if legacy NFS-Ganesha is running"
+  ansible.builtin.command: systemctl is-active nfs-ganesha  # noqa: command-instead-of-module
+  register: _nfs_ganesha_active
+  changed_when: false
+  failed_when: false
+
+- name: Apply nfs label to current host
+  ansible.builtin.command: >
+    ceph orch host label add {{ inventory_hostname | split('.') | first }} nfs
+
+- name: "Migration: create NFS cluster via cephadm"
+  ansible.builtin.command: >
+    ceph nfs cluster create {{ item.name }} "label:nfs"
+  loop: "{{ ceph_fs | default([]) }}"
+  when:
+    - item.nfs | default(false)
+    - inventory_hostname == ceph_bootstrap_node
+  run_once: true
+  failed_when: false
+  changed_when: true
+
+- name: "Migration: stop legacy NFS-Ganesha"
+  ansible.builtin.service:
+    name: nfs-ganesha
+    state: stopped
+    enabled: false
+  when:
+    - _nfs_ganesha_active.rc | default(1) == 0
+
+- name: "Migration: wait for NFS containers to come up"
+  ansible.builtin.command: ceph orch ps --daemon-type nfs --format json
+  register: _nfs_migrate_ps
+  until: >-
+    (_nfs_migrate_ps.stdout | from_json | length > 0) and
+    (_nfs_migrate_ps.stdout | from_json
+     | selectattr('status_desc', 'equalto', 'running') | list | length ==
+     _nfs_migrate_ps.stdout | from_json | length)
+  retries: 60
+  delay: 10
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Migration: recreate CephFS subtrees for NFS"
+  ansible.builtin.shell: |
+    set -e
+    mkdir -p /mnt/cephfs-temp
+    mount -t ceph "admin@.{{ item.name }}=/" /mnt/cephfs-temp
+    mkdir -p "/mnt/cephfs-temp/{{ item.nfs_root }}"
+    chmod 777 "/mnt/cephfs-temp/{{ item.nfs_root }}"
+    umount /mnt/cephfs-temp
+    rm -rf /mnt/cephfs-temp
+  loop: "{{ ceph_fs | default([]) }}"
+  when:
+    - item.nfs | default(false)
+    - item.nfs_root is defined
+    - inventory_hostname == ceph_bootstrap_node
+  run_once: true
+  changed_when: false
+
+- name: "Migration: recreate NFS exports via cephadm"
+  ansible.builtin.include_tasks: cephadm-nfs-export.yml
+  loop: "{{ ceph_fs | default([]) }}"
+  loop_control:
+    loop_var: _nfs_fs
+  when:
+    - _nfs_fs.nfs | default(false)
+    - inventory_hostname == ceph_bootstrap_node
+  run_once: true
+
+- name: "Migration: remove legacy NFS packages"
+  ansible.builtin.apt:
+    name:
+      - nfs-ganesha
+      - nfs-ganesha-ceph
+    state: absent
+    purge: true
+
+- name: "Migration: remove legacy ganesha.conf"
+  ansible.builtin.file:
+    path: /etc/ganesha/ganesha.conf
+    state: absent

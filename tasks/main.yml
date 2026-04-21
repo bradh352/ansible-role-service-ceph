@@ -48,14 +48,29 @@
   loop: "{{ groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort }}"
 
 # -----------------------------------------------------------------------
+# NFS exports fact (used throughout)
+# -----------------------------------------------------------------------
+
+- name: "Determine which filesystems have NFS exports"
+  ansible.builtin.set_fact:
+    ceph_nfs_exports: >-
+      {{ ceph_fs | default([])
+         | selectattr('nfs', 'defined')
+         | selectattr('nfs', 'equalto', true)
+         | map(attribute='name') | list }}
+
+# -----------------------------------------------------------------------
 # Deployment mode detection (Step 6)
 # -----------------------------------------------------------------------
 
-- name: "Detect cephadm-managed daemon units on this node"
-  ansible.builtin.find:
-    paths: /etc/systemd/system
-    patterns: "ceph-{{ ceph_uuid }}@*.service"
+- name: "List active ceph daemon units on this node"  # noqa: command-instead-of-module
+  ansible.builtin.shell: >
+    systemctl list-units --no-legend --no-pager --plain
+    'ceph-{{ ceph_uuid | lower }}@*.service' 2>/dev/null | awk '{ print $1 };' || true
   register: _cephadm_units
+  changed_when: false
+  args:
+    executable: /bin/bash
 
 - name: "Detect legacy MON data directory"
   ansible.builtin.stat:
@@ -86,45 +101,64 @@
 
 - name: "Set per-daemon migration flags"
   ansible.builtin.set_fact:
-    _cephadm_units_present: "{{ _cephadm_units.files | length > 0 }}"
+    _cephadm_units_present: "{{ _cephadm_units.stdout_lines | length > 0 }}"
     _needs_mon_adopt: >-
       {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] and
          (_legacy_mon_dir.stat.exists | default(false)) and
-         not (_cephadm_units.files | map(attribute='path') | map('basename')
-              | select('match', 'ceph-' + ceph_uuid + '@mon\\..*\\.service')
+         not (_cephadm_units.stdout_lines
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@mon\\..*\\.service')
               | list | length > 0) }}
     _needs_osd_adopt: >-
       {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] and
          ((_legacy_osd_list.stdout | default('{}', true)) | from_json | length > 0) and
-         not (_cephadm_units.files | map(attribute='path') | map('basename')
-              | select('match', 'ceph-' + ceph_uuid + '@osd\\..*\\.service')
+         not (_cephadm_units.stdout_lines
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@osd\\..*\\.service')
               | list | length > 0) }}
     _needs_mds_adopt: >-
       {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] and
          (_legacy_mds_dir.stat.exists | default(false)) and
-         not (_cephadm_units.files | map(attribute='path') | map('basename')
-              | select('match', 'ceph-' + ceph_uuid + '@mds\\..*\\.service')
+         not (_cephadm_units.stdout_lines
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@mds\\..*\\.service')
               | list | length > 0) }}
     _needs_rgw_adopt: >-
       {{ groups['ceph_' + ceph_cluster_name + '_rgw'] is defined and
          inventory_hostname in groups['ceph_' + ceph_cluster_name + '_rgw'] and
          (_legacy_rgw_dir.stat.exists | default(false)) and
-         not (_cephadm_units.files | map(attribute='path') | map('basename')
-              | select('match', 'ceph-' + ceph_uuid + '@rgw\\..*\\.service')
+         not (_cephadm_units.stdout_lines
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@rgw\\..*\\.service')
+              | list | length > 0) }}
+    _needs_nfs_adopt: >-
+      {{ groups['ceph_' + ceph_cluster_name + '_mds'] is defined and
+         inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] and
+         ceph_nfs_exports | length > 0 and
+         not (_cephadm_units.stdout_lines
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@nfs')
               | list | length > 0) }}
 
 - name: "Compute cluster-wide deployment mode"
   ansible.builtin.set_fact:
     _cluster_mode: >-
-      {%- set any_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+      {%- set mon_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
             | map('extract', hostvars)
             | map(attribute='_needs_mon_adopt', default=false)
+            | select | list | length > 0 -%}
+      {%- set osd_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+            | map('extract', hostvars)
+            | map(attribute='_needs_osd_adopt', default=false)
+            | select | list | length > 0 -%}
+      {%- set mds_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+            | map('extract', hostvars)
+            | map(attribute='_needs_mds_adopt', default=false)
+            | select | list | length > 0 -%}
+      {%- set rgw_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+            | map('extract', hostvars)
+            | map(attribute='_needs_rgw_adopt', default=false)
             | select | list | length > 0 -%}
       {%- set any_cephadm = groups['ceph_' + ceph_cluster_name + '_mon']
             | map('extract', hostvars)
             | map(attribute='_cephadm_units_present', default=false)
             | select | list | length > 0 -%}
-      {%- if any_legacy -%}legacy
+      {%- if mon_legacy or osd_legacy or mds_legacy or rgw_legacy -%}legacy
       {%- elif any_cephadm -%}cephadm
       {%- else -%}fresh{%- endif -%}
   run_once: true
@@ -203,17 +237,7 @@
          (not admin_keyring.stat.exists or not osd_keyring.stat.exists) and
          inventory_hostname == ceph_bootstrap_node }}
 
-# -----------------------------------------------------------------------
-# NFS exports fact (used throughout)
-# -----------------------------------------------------------------------
 
-- name: "Determine which filesystems have NFS exports"
-  ansible.builtin.set_fact:
-    ceph_nfs_exports: >-
-      {{ ceph_fs | default([])
-         | selectattr('nfs', 'defined')
-         | selectattr('nfs', 'equalto', true)
-         | map(attribute='name') | list }}
 
 # -----------------------------------------------------------------------
 # Phase 1: Prerequisites (all nodes)
@@ -235,15 +259,19 @@
 # -----------------------------------------------------------------------
 
 - name: "Migrate legacy cluster to cephadm"
-  ansible.builtin.import_tasks: cephadm-migrate.yml
+  ansible.builtin.include_tasks: cephadm-migrate.yml
   when: ceph_deployment_mode == 'legacy'
+
+- name: "Migrate legacy nfs cephadm"
+  ansible.builtin.include_tasks: cephadm-migrate-nfs.yml
+  when: _needs_nfs_adopt
 
 # -----------------------------------------------------------------------
 # Phase 3b: Fresh install bootstrap
 # -----------------------------------------------------------------------
 
 - name: "Bootstrap new cluster"
-  ansible.builtin.import_tasks: cephadm-bootstrap.yml
+  ansible.builtin.include_tasks: cephadm-bootstrap.yml
   when:
     - ceph_deployment_mode == 'fresh'
     - inventory_hostname == ceph_bootstrap_node
@@ -280,7 +308,7 @@
 # -----------------------------------------------------------------------
 
 - name: "Apply global ceph config"
-  ansible.builtin.import_tasks: cephadm-config.yml
+  ansible.builtin.include_tasks: cephadm-config.yml
   when: inventory_hostname == ceph_bootstrap_node
 
 # -----------------------------------------------------------------------
@@ -288,13 +316,13 @@
 # -----------------------------------------------------------------------
 
 - name: "Register hosts and labels with orchestrator"
-  ansible.builtin.import_tasks: cephadm-hosts.yml
+  ansible.builtin.include_tasks: cephadm-hosts.yml
   when:
     - ceph_deployment_mode != 'legacy'
     - inventory_hostname == ceph_bootstrap_node
 
 - name: "Apply service specs"
-  ansible.builtin.import_tasks: cephadm-services.yml
+  ansible.builtin.include_tasks: cephadm-services.yml
   when:
     - ceph_deployment_mode != 'legacy'
     - inventory_hostname == ceph_bootstrap_node
@@ -304,14 +332,14 @@
 # -----------------------------------------------------------------------
 
 - name: "Configure pools"
-  ansible.builtin.import_tasks: ceph-pools.yml
+  ansible.builtin.include_tasks: ceph-pools.yml
   when:
     - ceph_pools is defined
     - ceph_pools | length > 0
     - inventory_hostname == ceph_bootstrap_node
 
 - name: "Configure filesystems"
-  ansible.builtin.import_tasks: ceph-fs.yml
+  ansible.builtin.include_tasks: ceph-fs.yml
   when:
     - ceph_fs is defined
     - ceph_fs | length > 0
@@ -322,7 +350,7 @@
 # -----------------------------------------------------------------------
 
 - name: "Configure NFS exports"
-  ansible.builtin.import_tasks: cephadm-nfs.yml
+  ansible.builtin.include_tasks: cephadm-nfs.yml
   when:
     - ceph_nfs_exports | length > 0
     - inventory_hostname == ceph_bootstrap_node
@@ -332,7 +360,7 @@
 # -----------------------------------------------------------------------
 
 - name: "Configure RGW zone"
-  ansible.builtin.import_tasks: cephadm-rgw.yml
+  ansible.builtin.include_tasks: cephadm-rgw.yml
   when:
     - groups['ceph_' + ceph_cluster_name + '_rgw'] is defined
     - groups['ceph_' + ceph_cluster_name + '_rgw'] | length > 0
@@ -344,7 +372,7 @@
 # -----------------------------------------------------------------------
 
 - name: "Validate and apply CRUSH topology"
-  ansible.builtin.import_tasks: cephadm-crush.yml
+  ansible.builtin.include_tasks: cephadm-crush.yml
   when: inventory_hostname == ceph_bootstrap_node
 
 # -----------------------------------------------------------------------
@@ -359,7 +387,7 @@
 # -----------------------------------------------------------------------
 
 - name: "Configure Prometheus metrics"
-  ansible.builtin.import_tasks: cephadm-prometheus.yml
+  ansible.builtin.include_tasks: cephadm-prometheus.yml
   when:
     - ceph_prometheus
     - inventory_hostname == ceph_bootstrap_node

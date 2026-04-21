@@ -9,11 +9,11 @@
     cephadm bootstrap
     --mon-ip {{ ceph_mon_ip }}
     --cluster-network {{ ceph_cluster_network }}
-    --fsid {{ ceph_uuid }}
+    --fsid {{ ceph_uuid | lower }}
     --ssh-user {{ ceph_cephadm_user }}
-    --ssh-private-key /home/{{ ceph_cephadm_user }}/.ssh/id_ed25519
-    --ssh-public-key /home/{{ ceph_cephadm_user }}/.ssh/id_ed25519.pub
-    --image {{ ceph_container_image }}:{{ ceph_version }}
+    --ssh-private-key {{ ceph_cephadm_home }}/.ssh/id_ed25519
+    --ssh-public-key {{ ceph_cephadm_home }}/.ssh/id_ed25519.pub
+    --image {{ ceph_container_image }}:v{{ ceph_version }}
     --skip-pull
     --skip-dashboard
     --output-keyring /etc/ceph/ceph.client.admin.keyring

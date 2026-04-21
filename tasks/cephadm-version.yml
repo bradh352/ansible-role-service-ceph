@@ -1,18 +1,17 @@
 ---
-# --- Legacy mode: assert deployed version matches ceph_version ---
 
-- name: "Legacy: get currently deployed ceph version"
+- name: "Get currently deployed ceph version"
   ansible.builtin.command: ceph version --format json
   register: _ceph_ver_raw
   changed_when: false
-  when: ceph_deployment_mode == 'legacy'
 
-- name: "Legacy: parse major.minor from version string"
+- name: "Parse major.minor.rel from version string"
   ansible.builtin.set_fact:
     _ceph_deployed_ver: >-
-      v{{ _ceph_ver_raw.stdout | from_json | json_query('version')
-         | regex_search('[0-9]+\.[0-9]+') }}
-  when: ceph_deployment_mode == 'legacy'
+      {{ _ceph_ver_raw.stdout | from_json | json_query('version')
+         | regex_search('[0-9]+\.[0-9]+\.[0-9]+') }}
+
+# --- Legacy mode: assert deployed version matches ceph_version ---
 
 - name: "Legacy: assert deployed version matches ceph_version (no upgrade during migration)"
   ansible.builtin.assert:
@@ -25,46 +24,27 @@
 
 # --- cephadm mode: upgrade if ceph_version changed ---
 
-- name: "Cephadm: get running daemon image tags"
-  ansible.builtin.command: ceph orch ps --format json
-  register: _orch_ps_ver
-  changed_when: false
-  when: ceph_deployment_mode == 'cephadm'
-
-- name: "Cephadm: extract current deployed tag from first running daemon"
-  ansible.builtin.set_fact:
-    _current_image_tag: >-
-      {%- set ps = _orch_ps_ver.stdout | default('[]') | from_json -%}
-      {%- set running = ps | selectattr('status_desc', 'equalto', 'running') | list -%}
-      {%- if running | length > 0 -%}
-        {%- set img = running[0].container_image_name | default('') -%}
-        {{ img | regex_search('v[0-9]+\.[0-9]+') | default('') }}
-      {%- else -%}
-        unknown
-      {%- endif -%}
-  when: ceph_deployment_mode == 'cephadm'
-
 - name: "Cephadm: check if upgrade is already in progress"
   ansible.builtin.command: ceph orch upgrade status --format json
   register: _upgrade_status_check
   changed_when: false
+  failed_when: _upgrade_status_check.rc != 0 and _upgrade_status_check.rc !=2
   when: ceph_deployment_mode == 'cephadm'
 
 - name: "Cephadm: start upgrade if version tag differs"
   ansible.builtin.command: >
-    ceph orch upgrade start --image {{ ceph_container_image }}:{{ ceph_version }}
+    ceph orch upgrade start --image {{ ceph_container_image }}:v{{ ceph_version }}
   when:
     - ceph_deployment_mode == 'cephadm'
-    - _current_image_tag | default('') != ceph_version
-    - _current_image_tag | default('') != 'unknown'
-    - not (_upgrade_status_check.stdout | from_json).in_progress | default(false)
+    - _ceph_deployed_ver != ceph_version
+    - not (_upgrade_status_check.stdout | trim | default('{}') | from_json).in_progress | default(false)
   register: _upgrade_started
   changed_when: true
 
 - name: "Cephadm: wait for upgrade to complete"
   ansible.builtin.command: ceph orch upgrade status --format json
   register: _upgrade_wait
-  until: not (_upgrade_wait.stdout | from_json).in_progress | default(false)
+  until: not (_upgrade_wait.stdout | trim | from_json).in_progress | default(false)
   retries: 120
   delay: 30
   changed_when: false

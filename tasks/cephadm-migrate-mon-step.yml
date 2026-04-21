@@ -4,18 +4,16 @@
 
 - name: "Adopt MON daemon on {{ _mon_to_adopt }}"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name
-    mon.{{ _mon_to_adopt | split('.') | first }} --skip-pull
-  delegate_to: "{{ _mon_to_adopt }}"
-  when: hostvars[_mon_to_adopt]['_needs_mon_adopt'] | default(false)
+    cephadm adopt --style legacy --name mon.{{ inventory_hostname | split('.') | first }} --skip-pull
   changed_when: true
 
 - name: "Adopt MGR daemon on {{ _mon_to_adopt }}"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name
-    mgr.{{ _mon_to_adopt | split('.') | first }} --skip-pull
+    cephadm adopt --style legacy --name mgr.{{ inventory_hostname | split('.') | first }} --skip-pull
   delegate_to: "{{ _mon_to_adopt }}"
-  when: hostvars[_mon_to_adopt]['_needs_mon_adopt'] | default(false)
+  when:
+    - inventory_hostname != ceph_bootstrap_node
+    - _needs_mon_adopt | default(false)
   changed_when: true
 
 - name: "Wait for quorum to restore after adopting {{ _mon_to_adopt }}"
@@ -27,4 +25,3 @@
   retries: 30
   delay: 10
   changed_when: false
-  when: hostvars[_mon_to_adopt]['_needs_mon_adopt'] | default(false)
