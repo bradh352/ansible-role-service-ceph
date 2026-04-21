@@ -1,7 +1,7 @@
 ---
 - name: "Make sure /var/lib/ceph/bootstrap-osd exists"
   ansible.builtin.file:
-    path: "/var/lib/ceph/boostrap-osd"
+    path: "/var/lib/ceph/bootstrap-osd"
     owner: ceph
     state: directory
 
