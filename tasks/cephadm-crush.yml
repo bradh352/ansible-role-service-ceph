@@ -1,6 +1,59 @@
 ---
-- name: "Validate and apply CRUSH topology for each OSD node"
-  ansible.builtin.include_tasks: cephadm-crush-node.yml
-  loop: "{{ groups['ceph_' + ceph_cluster_name + '_osd'] | unique | sort }}"
-  loop_control:
-    loop_var: _crush_host
+- name: "Get OSD IDs"
+  ansible.builtin.command: >
+    ceph osd ls-tree {{ inventory_hostname | split('.') | first }} --format json
+  register: _host_osd_ids
+  changed_when: false
+  failed_when: false
+
+- name: "Skip crush update if no OSDs found"
+  ansible.builtin.meta: noop
+  when: (_host_osd_ids.stdout | default('[]') | from_json | length) == 0
+
+- name: "Get current CRUSH location "
+  ansible.builtin.command: >
+    ceph osd find {{ _host_osd_ids.stdout | from_json | first }} --format json
+  register: _osd_find
+  changed_when: false
+  when: (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+
+- name: "Build desired CRUSH location"
+  ansible.builtin.set_fact:
+    _desired_crush: >-
+      {%- set loc = {'root': 'default'} -%}
+      {%- if ceph_osd_chassis is defined -%}
+        {%- set _ = loc.update({'chassis': ceph_osd_chassis}) -%}
+      {%- endif -%}
+      {%- if ceph_osd_rack is defined -%}
+        {%- set _ = loc.update({'rack': ceph_osd_rack}) -%}
+      {%- endif -%}
+      {%- if ceph_osd_row is defined -%}
+        {%- set _ = loc.update({'row': ceph_osd_row}) -%}
+      {%- endif -%}
+      {%- if ceph_osd_room is defined -%}
+        {%- set _ = loc.update({'room': ceph_osd_room}) -%}
+      {%- endif -%}
+      {{ loc }}
+  when: (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+
+- name: "Check if CRUSH location needs update"
+  ansible.builtin.set_fact:
+    _crush_needs_update: >-
+      {%- set current = (_osd_find.stdout | from_json).crush_location | default({}) -%}
+      {%- set current_filtered = {} -%}
+      {%- for k, v in current.items() -%}
+        {%- if k != 'host' -%}
+          {%- set _ = current_filtered.update({k: v}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ current_filtered != _desired_crush }}
+  when: (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+
+- name: "Update CRUSH location"
+  ansible.builtin.command: >
+    ceph osd crush move {{ inventory_hostname | split('.') | first }}
+    {% for k, v in _desired_crush.items() %}{{ k }}={{ v }} {% endfor %}
+  when:
+    - (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+    - _crush_needs_update | default(false) | bool
+  changed_when: true
