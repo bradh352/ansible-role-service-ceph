@@ -3,6 +3,13 @@
 # Pre-flight checks — run once on bootstrap node
 # -----------------------------------------------------------------------
 
+- name: "Mute health checks that are expected during migration"
+  ansible.builtin.shell: |
+    ceph health mute CEPHADM_STRAY_HOST || true
+    ceph health mute CEPHADM_STRAY_DAEMON || true
+    ceph health mute CEPHADM_FAILED_DAEMON || true
+    ceph health mute CEPHADM_APPLY_SPEC_FAIL || true
+
 - name: "Migration: check cluster health before starting"
   ansible.builtin.command: ceph health --format json
   register: _preflight_health
@@ -10,10 +17,6 @@
   run_once: true
   delegate_to: "{{ ceph_bootstrap_node }}"
 
-# This may fail on secondary hosts due to them not being migrated.  You may
-# need to call:
-#   ceph health mute CEPHADM_STRAY_DAEMON
-#   ceph health mute CEPHADM_STRAY_HOST
 - name: "Migration: assert cluster is healthy"
   ansible.builtin.assert:
     that: (_preflight_health.stdout | from_json).status == 'HEALTH_OK'
@@ -154,6 +157,7 @@
     ceph mgr fail {{ node | split('.') | first }}
     {%   endif %}
     {% endfor %}
+    {# Run twice, some times one can come up too fast #}
     {% for node in groups['ceph_' + ceph_cluster_name + '_mon'] %}
     {%   if node != inventory_hostname %}
     ceph mgr fail {{ node | split('.') | first }}
@@ -184,10 +188,6 @@
     (_orch_status.stdout | trim | default('{}') | from_yaml).backend | default('') != 'cephadm'
   changed_when: true
 
-
-# NOTE: If this fails, its likely due to not all MGR daemons supporting cephadm because they are legacy.
-#       You actually need to use ceph mgr fail <node> for each node that isn't the main one being
-#       brought up now if you're migrating just one.  Basically the active mgr node needs to be non-legacy.
 - name: "Migration: set orchestrator backend to cephadm"
   ansible.builtin.command: ceph orch set backend cephadm
   run_once: true
