@@ -11,8 +11,7 @@
 
 - name: "Add current host to cephadm orchestrator"
   ansible.builtin.command: >
-    ceph orch host add {{ inventory_hostname }} {{ hostvars[item].ceph_mon_ip | default(hostvars[item].ansible_host) }}
-  loop: "{{ _ceph_all_nodes }}"
+    ceph orch host add {{ inventory_hostname }} {{ ceph_mon_ip | default(ansible_host) }}
   when: inventory_hostname not in _registered_hosts
   changed_when: true
 

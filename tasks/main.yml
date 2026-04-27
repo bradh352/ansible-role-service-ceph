@@ -67,7 +67,7 @@
   ansible.builtin.shell: >
     set -o pipefail;
     systemctl list-units --no-legend --no-pager --plain
-    'ceph-{{ ceph_uuid | lower }}@*.service' 2>/dev/null | awk '{ print $1 };' || true
+    'ceph-{{ ceph_uuid | lower }}@*.service' | awk '{ print $1 };'
   register: _cephadm_units
   changed_when: false
   args:
@@ -143,19 +143,19 @@
             | map('extract', hostvars)
             | map(attribute='_needs_mon_adopt', default=false)
             | select | list | length > 0 -%}
-      {%- set osd_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+      {%- set osd_legacy = groups['ceph_' + ceph_cluster_name + '_osd']
             | map('extract', hostvars)
             | map(attribute='_needs_osd_adopt', default=false)
             | select | list | length > 0 -%}
-      {%- set mds_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+      {%- set mds_legacy = groups['ceph_' + ceph_cluster_name + '_mds']
             | map('extract', hostvars)
             | map(attribute='_needs_mds_adopt', default=false)
             | select | list | length > 0 -%}
-      {%- set rgw_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
+      {%- set rgw_legacy = (groups['ceph_' + ceph_cluster_name + '_rgw'] | default([]))
             | map('extract', hostvars)
             | map(attribute='_needs_rgw_adopt', default=false)
             | select | list | length > 0 -%}
-      {%- set any_cephadm = groups['ceph_' + ceph_cluster_name + '_mon']
+      {%- set any_cephadm = _ceph_all_nodes
             | map('extract', hostvars)
             | map(attribute='_cephadm_units_present', default=false)
             | select | list | length > 0 -%}

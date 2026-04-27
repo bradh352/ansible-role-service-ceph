@@ -18,13 +18,19 @@
 - name: "Migration: create NFS cluster via cephadm"
   ansible.builtin.command: >
     ceph nfs cluster create {{ item.name }} "label:nfs"
+  register: _nfs_cluster_create
   loop: "{{ ceph_fs | default([]) }}"
   when:
     - item.nfs | default(false)
     - inventory_hostname == ceph_bootstrap_node
   run_once: true
-  failed_when: false
-  changed_when: true
+  failed_when:
+    - _nfs_cluster_create.rc is defined
+    - _nfs_cluster_create.rc != 0
+    - "'already exists' not in (_nfs_cluster_create.stderr | default(''))"
+  changed_when:
+    - _nfs_cluster_create.rc is defined
+    - _nfs_cluster_create.rc == 0
 
 - name: "Migration: stop legacy NFS-Ganesha"
   ansible.builtin.service:

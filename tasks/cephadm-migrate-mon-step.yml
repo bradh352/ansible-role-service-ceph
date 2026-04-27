@@ -1,22 +1,19 @@
 ---
-# Called in a loop from cephadm-migrate.yml with _mon_to_adopt set.
-# Runs from the bootstrap node context (run_once loop), delegates to the target.
+# Per-host MON+MGR adoption. Caller (cephadm-migrate.yml) gates the
+# include on `_needs_mon_adopt` and uses `throttle: 1` to keep adoption
+# sequential so quorum is preserved across the cluster.
 
-- name: "Adopt MON daemon on {{ _mon_to_adopt }}"
+- name: "Adopt MON daemon on {{ inventory_hostname | split('.') | first }}"
   ansible.builtin.command: >
     cephadm adopt --style legacy --name mon.{{ inventory_hostname | split('.') | first }} --skip-pull
   changed_when: true
 
-- name: "Adopt MGR daemon on {{ _mon_to_adopt }}"
+- name: "Adopt MGR daemon on {{ inventory_hostname | split('.') | first }}"
   ansible.builtin.command: >
     cephadm adopt --style legacy --name mgr.{{ inventory_hostname | split('.') | first }} --skip-pull
-  delegate_to: "{{ _mon_to_adopt }}"
-  when:
-    - inventory_hostname != ceph_bootstrap_node
-    - _needs_mon_adopt | default(false)
   changed_when: true
 
-- name: "Wait for quorum to restore after adopting {{ _mon_to_adopt }}"
+- name: "Wait for quorum to restore after adopting {{ inventory_hostname | split('.') | first }}"
   ansible.builtin.command: ceph quorum_status --format json
   register: _quorum_check
   until: >-
