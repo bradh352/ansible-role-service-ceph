@@ -43,7 +43,7 @@
     mode: "0755"
     owner: root
     group: root
-  when: ansible_distribution == 'Debian'
+  when: ansible_facts['distribution'] == 'Debian'
 
 - name: "Download Ceph apt repository GPG key"
   ansible.builtin.get_url:
@@ -52,14 +52,14 @@
     mode: "0644"
     owner: root
     group: root
-  when: ansible_distribution == 'Debian'
+  when: ansible_facts['distribution'] == 'Debian'
 
 - name: "Add Ceph apt repository (Debian only)"
   ansible.builtin.apt_repository:
     repo: >-
       deb [signed-by=/etc/apt/keyrings/ceph-release.asc]
       https://download.ceph.com/debian-{{ _ceph_release_name[_ceph_major] | default('squid') }}/
-      {{ ansible_distribution_release }} main
+      {{ ansible_facts['distribution_release'] }} main
     state: present
     update_cache: true
   vars:
@@ -69,14 +69,14 @@
       "18": reef
       "17": quincy
       "16": pacific
-  when: ansible_distribution == 'Debian'
+  when: ansible_facts['distribution'] == 'Debian'
 
 - name: "Enable Ubuntu universe repo (provides cephadm on Ubuntu)"
   ansible.builtin.apt_repository:
-    repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
+    repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_facts['distribution_release'] }} universe"
     state: present
     update_cache: true
-  when: ansible_distribution == 'Ubuntu'
+  when: ansible_facts['distribution'] == 'Ubuntu'
 
 - name: "Install cephadm and ceph-common"
   ansible.builtin.apt:
