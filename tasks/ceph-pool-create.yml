@@ -1,8 +1,13 @@
 ---
 - name: "Create pool {{ pool_name }}"
   ansible.builtin.command: "ceph osd pool create {{ pool_name }} replicated --autoscale-mode=on"
-- name: "Associate pool {{ pool_name }} with application {{ pool_application }}"
+  changed_when: true
+
+- name: "Enable application on pool {{ pool_name }}"
   ansible.builtin.command: "ceph osd pool application enable {{ pool_name }} {{ pool_application }}"
+  changed_when: true
+
 - name: "Set bulk mode on pool {{ pool_name }}"
   ansible.builtin.command: "ceph osd pool set {{ pool_name }} bulk true"
   when: pool_bulk
+  changed_when: true

@@ -92,11 +92,11 @@
     name: "{{ ceph_cephadm_user }}"
     state: present
   register: cephadm_user_info
-  check_mode: yes
+  check_mode: true
   failed_when: false
 
 - name: "Determine cephadm user home dir"
-  set_fact:
+  ansible.builtin.set_fact:
     ceph_cephadm_home: "{{ cephadm_user_info.home | default('/home/cephadm') }}"
 
 - name: "Create cephadm system user"

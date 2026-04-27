@@ -21,19 +21,15 @@
     ceph orch host label add {{ inventory_hostname | split('.') | first }} {{ item }}
   loop: "{{ _host_labels }}"
   vars:
+    _is_mon: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] }}"
+    _is_osd: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] }}"
+    _is_mds: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] }}"
+    _is_nfs: "{{ _is_mds and ceph_nfs_exports | length > 0 }}"
     _host_labels: >-
       {%- set ns = namespace(labels=[]) -%}
-      {%- if inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] %}
-        {%- set ns.labels = ns.labels + [ 'mon', 'mgr' ] -%}
-      {%- endif -%}
-      {%- if inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] %}
-        {%- set ns.labels = ns.labels + [ 'osd' ] -%}
-      {%- endif -%}
-      {%- if inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] %}
-        {%- set ns.labels = ns.labels + [ 'mds' ] -%}
-        {%- if ceph_nfs_exports | length > 0 -%}
-          {%- set ns.labels = ns.labels + [ 'nfs' ] -%}
-        {%- endif -%}
-      {%- endif -%}
+      {%- if _is_mon %}{% set ns.labels = ns.labels + ['mon', 'mgr'] %}{% endif -%}
+      {%- if _is_osd %}{% set ns.labels = ns.labels + ['osd'] %}{% endif -%}
+      {%- if _is_mds %}{% set ns.labels = ns.labels + ['mds'] %}{% endif -%}
+      {%- if _is_nfs %}{% set ns.labels = ns.labels + ['nfs'] %}{% endif -%}
       {{ ns.labels }}
   changed_when: false

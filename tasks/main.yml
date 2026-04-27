@@ -65,6 +65,7 @@
 
 - name: "List active ceph daemon units on this node"  # noqa: command-instead-of-module
   ansible.builtin.shell: >
+    set -o pipefail;
     systemctl list-units --no-legend --no-pager --plain
     'ceph-{{ ceph_uuid | lower }}@*.service' 2>/dev/null | awk '{ print $1 };' || true
   register: _cephadm_units
@@ -236,8 +237,6 @@
       {{ ceph_deployment_mode == 'fresh' and
          (not admin_keyring.stat.exists or not osd_keyring.stat.exists) and
          inventory_hostname == ceph_bootstrap_node }}
-
-
 
 # -----------------------------------------------------------------------
 # Phase 1: Prerequisites (all nodes)
