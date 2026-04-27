@@ -8,6 +8,15 @@ ceph_container_image: "quay.io/ceph/ceph"
 ceph_cephadm_user: "cephadm"
 ceph_osd_min_size: 1099511627776
 ceph_osd_rotational: ~
+
+# OSD memory limits. Pinned explicitly because cephadm's autotune
+# default is unreliable across releases/installers, and on a
+# hyperconverged host the autotuned value (~0.7 * host_RAM / num_osds)
+# can crowd out the colocated workloads. The 4 GiB default matches
+# the upstream osd_memory_target default that the legacy ceph.conf
+# template implicitly relied on.
+ceph_osd_memory_target_autotune: false
+ceph_osd_memory_target: 4294967296
 ceph_container_registry: "quay.io"
 ceph_container_registry_user: ""
 ceph_container_registry_password: ""

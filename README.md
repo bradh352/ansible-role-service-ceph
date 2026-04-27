@@ -112,6 +112,13 @@ framework. All daemons run as OCI containers managed by podman.
   mirroring the existing 1 TB filter.
 * `ceph_osd_rotational`: Drive type filter. `~` (null) accepts any drive type,
   `false` selects only SSDs/NVMe, `true` selects only HDDs. Default: `~`.
+* `ceph_osd_memory_target_autotune`: Whether to let cephadm autotune
+  per-OSD memory based on host RAM. Pinned to `false` by default because
+  the autotuned value (~0.7 × host_RAM / num_osds) crowds out colocated
+  workloads on hyperconverged hosts.
+* `ceph_osd_memory_target`: Per-OSD memory target in bytes when
+  autotune is disabled. Default: `4294967296` (4 GiB), matching the
+  upstream `osd_memory_target` default.
 * `ceph_container_registry`: Registry hostname used as a prefix for the
   container image. Default: `quay.io`. Override when pulling from a mirror.
 * `ceph_container_registry_user`: Username for registry authentication.

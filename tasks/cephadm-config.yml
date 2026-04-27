@@ -12,4 +12,6 @@
     - {who: global, key: auth_allow_insecure_global_id_reclaim, value: "false"}
     - {who: global, key: mon_cluster_log_to_syslog, value: "true"}
     - {who: global, key: mon_allow_pool_delete, value: "true"}
+    - {who: osd, key: osd_memory_target_autotune, value: "{{ ceph_osd_memory_target_autotune | string | lower }}"}
+    - {who: osd, key: osd_memory_target, value: "{{ ceph_osd_memory_target }}"}
   changed_when: false
