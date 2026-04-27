@@ -1,24 +1,34 @@
 ---
-# Settings here mirror the legacy templates/nfs.conf.j2 from the pre-cephadm
-# era so behavior is preserved across migration: NFSv4-only over TCP, RW,
-# no_root_squash, FSAL_CEPH against the named filesystem.
+# `ceph nfs export create cephfs` is used here in preference to
+# `ceph nfs export apply -i <spec>`. The apply command has a bug
+# (observed on Ceph 19.2.x) where it writes the per-export rados
+# object (export-N) but does NOT update the cluster's conf-nfs.<id>
+# index that ganesha watches via RADOS_URLS.watch_url, so newly
+# applied exports are invisible to a running ganesha and even
+# survive a daemon redeploy. `create` updates the conf index and
+# triggers ganesha to reload via the rados watch.
+#
+# The defaults of `create cephfs` already match the legacy
+# templates/nfs.conf.j2: access_type=RW, squash=no_root_squash,
+# protocols=[4], transports=[TCP], fsal=CEPH+fs_name. We rely on
+# those defaults rather than passing extra flags.
 
-- name: "Apply NFS export for cluster {{ _nfs_fs.name }}"
-  ansible.builtin.command:
-    cmd: "ceph nfs export apply {{ _nfs_fs.name }} -i -"
-    stdin: "{{ _nfs_export_spec | to_nice_json }}"
-  vars:
+- name: "Get existing exports for cluster {{ _nfs_fs.name }}"
+  ansible.builtin.command: ceph nfs export ls {{ _nfs_fs.name }} --format json
+  register: _existing_exports
+  changed_when: false
+
+- name: "Set desired pseudo path for {{ _nfs_fs.name }}"
+  ansible.builtin.set_fact:
     _nfs_pseudo: "{{ _nfs_fs.nfs_export | default('/' + _nfs_fs.name) }}"
     _nfs_path: "{{ _nfs_fs.nfs_root | default('/') }}"
-    _nfs_export_spec:
-      cluster_id: "{{ _nfs_fs.name }}"
-      pseudo: "{{ _nfs_pseudo }}"
-      path: "{{ _nfs_path }}"
-      access_type: "RW"
-      squash: "no_root_squash"
-      protocols: [4]
-      transports: ["TCP"]
-      fsal:
-        name: "CEPH"
-        fs_name: "{{ _nfs_fs.name }}"
+
+- name: "Create NFS export for cluster {{ _nfs_fs.name }}"
+  ansible.builtin.command: >
+    ceph nfs export create cephfs
+    --cluster-id {{ _nfs_fs.name }}
+    --pseudo-path {{ _nfs_pseudo }}
+    --path {{ _nfs_path }}
+    --fsname {{ _nfs_fs.name }}
+  when: _nfs_pseudo not in (_existing_exports.stdout | default('[]') | from_json)
   changed_when: true

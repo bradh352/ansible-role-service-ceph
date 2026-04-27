@@ -1,0 +1,27 @@
+---
+# Apply orchestrator labels to the current host based on its inventory
+# group membership. Called from cephadm-hosts.yml (fresh/cephadm path)
+# and from cephadm-migrate.yml after each host's daemons have been
+# adopted, so cephadm can manage the adopted daemons against the spec.
+#
+# The rgw label is applied separately in the migration RGW block
+# because it is gated on the per-host adoption ordering.
+
+- name: "Apply daemon-type labels to current host"
+  ansible.builtin.command: >
+    ceph orch host label add {{ inventory_hostname | split('.') | first }} {{ item }}
+  loop: "{{ _host_labels }}"
+  vars:
+    _is_mon: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] }}"
+    _is_osd: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] }}"
+    _is_mds: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] }}"
+    _is_nfs: "{{ _is_mds and ceph_nfs_exports | length > 0 }}"
+    _host_labels: >-
+      {%- set ns = namespace(labels=[]) -%}
+      {%- if _is_mon %}{% set ns.labels = ns.labels + ['mon', 'mgr'] %}{% endif -%}
+      {%- if _is_osd %}{% set ns.labels = ns.labels + ['osd'] %}{% endif -%}
+      {%- if _is_mds %}{% set ns.labels = ns.labels + ['mds'] %}{% endif -%}
+      {%- if _is_nfs %}{% set ns.labels = ns.labels + ['nfs'] %}{% endif -%}
+      {{ ns.labels }}
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: true

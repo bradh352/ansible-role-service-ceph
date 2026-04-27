@@ -3,6 +3,7 @@
   ansible.builtin.command: ceph orch host ls --format json
   register: _orch_hosts
   changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
 
 - name: "Build set of already-registered hostnames"
   ansible.builtin.set_fact:
@@ -14,21 +15,7 @@
     ceph orch host add {{ inventory_hostname }} {{ ceph_mon_ip | default(ansible_host) }}
   when: inventory_hostname not in _registered_hosts
   changed_when: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
 
 - name: "Apply host labels based on group membership"
-  ansible.builtin.command: >
-    ceph orch host label add {{ inventory_hostname | split('.') | first }} {{ item }}
-  loop: "{{ _host_labels }}"
-  vars:
-    _is_mon: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] }}"
-    _is_osd: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] }}"
-    _is_mds: "{{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] }}"
-    _is_nfs: "{{ _is_mds and ceph_nfs_exports | length > 0 }}"
-    _host_labels: >-
-      {%- set ns = namespace(labels=[]) -%}
-      {%- if _is_mon %}{% set ns.labels = ns.labels + ['mon', 'mgr'] %}{% endif -%}
-      {%- if _is_osd %}{% set ns.labels = ns.labels + ['osd'] %}{% endif -%}
-      {%- if _is_mds %}{% set ns.labels = ns.labels + ['mds'] %}{% endif -%}
-      {%- if _is_nfs %}{% set ns.labels = ns.labels + ['nfs'] %}{% endif -%}
-      {{ ns.labels }}
-  changed_when: false
+  ansible.builtin.import_tasks: cephadm-host-labels.yml

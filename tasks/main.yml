@@ -311,14 +311,20 @@
   when: inventory_hostname == ceph_bootstrap_node
 
 # -----------------------------------------------------------------------
-# Host registration + service specs (fresh and cephadm paths)
+# Host registration + service specs
+#
+# cephadm-hosts.yml runs unconditionally per-host: it is idempotent
+# (host-add is gated on the orchestrator's registered list, label-add
+# is server-side idempotent). Running it during a partial migration
+# is safe because main.yml runs cephadm-migrate.yml first, so any
+# host this loop touches has already had its daemons adopted.
+# All orch commands inside delegate to the bootstrap node so hosts
+# without an admin keyring (OSD/MDS-only nodes during legacy
+# migration) can still register/label themselves.
 # -----------------------------------------------------------------------
 
 - name: "Register hosts and labels with orchestrator"
   ansible.builtin.include_tasks: cephadm-hosts.yml
-  when:
-    - ceph_deployment_mode != 'legacy'
-    - inventory_hostname == ceph_bootstrap_node
 
 - name: "Apply service specs"
   ansible.builtin.include_tasks: cephadm-services.yml
