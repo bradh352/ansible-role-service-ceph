@@ -1,22 +1,24 @@
 ---
-- name: "Get existing exports for NFS cluster {{ _nfs_fs.name }}"
-  ansible.builtin.command: >
-    ceph nfs export ls {{ _nfs_fs.name }} --format json
-  register: _existing_exports
-  changed_when: false
-  failed_when: false
+# Settings here mirror the legacy templates/nfs.conf.j2 from the pre-cephadm
+# era so behavior is preserved across migration: NFSv4-only over TCP, RW,
+# no_root_squash, FSAL_CEPH against the named filesystem.
 
-- name: "Set desired pseudo path for {{ _nfs_fs.name }}"
-  ansible.builtin.set_fact:
+- name: "Apply NFS export for cluster {{ _nfs_fs.name }}"
+  ansible.builtin.command:
+    cmd: "ceph nfs export apply {{ _nfs_fs.name }} -i -"
+    stdin: "{{ _nfs_export_spec | to_nice_json }}"
+  vars:
     _nfs_pseudo: "{{ _nfs_fs.nfs_export | default('/' + _nfs_fs.name) }}"
     _nfs_path: "{{ _nfs_fs.nfs_root | default('/') }}"
-
-- name: "Create NFS export if absent: {{ _nfs_fs.name }}"
-  ansible.builtin.command: >
-    ceph nfs export create cephfs
-    --cluster-id {{ _nfs_fs.name }}
-    --pseudo-path {{ _nfs_pseudo }}
-    --path {{ _nfs_path }}
-    --fsname {{ _nfs_fs.name }}
-  when: _nfs_pseudo not in (_existing_exports.stdout | default('[]') | from_json)
+    _nfs_export_spec:
+      cluster_id: "{{ _nfs_fs.name }}"
+      pseudo: "{{ _nfs_pseudo }}"
+      path: "{{ _nfs_path }}"
+      access_type: "RW"
+      squash: "no_root_squash"
+      protocols: [4]
+      transports: ["TCP"]
+      fsal:
+        name: "CEPH"
+        fs_name: "{{ _nfs_fs.name }}"
   changed_when: true
