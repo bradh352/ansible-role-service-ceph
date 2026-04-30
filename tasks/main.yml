@@ -381,6 +381,20 @@
   when: inventory_hostname == ceph_bootstrap_node
 
 # -----------------------------------------------------------------------
+# Image normalization (bootstrap node)
+#
+# Re-deploy any daemon whose container image drifted from
+# `ceph_container_image` (e.g. mds/rgw/nfs daemons that inherited a
+# `docker.io/ceph/daemon-base:latest-master-devel` per-daemon image
+# override at adoption time and that `ceph orch upgrade` then refused
+# to touch).
+# -----------------------------------------------------------------------
+
+- name: "Normalize daemon container images"
+  ansible.builtin.include_tasks: cephadm-normalize-images.yml
+  when: inventory_hostname == ceph_bootstrap_node
+
+# -----------------------------------------------------------------------
 # Nice levels (all nodes)
 # -----------------------------------------------------------------------
 

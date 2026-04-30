@@ -147,7 +147,8 @@
 
 - name: "Migration: adopt bootstrap MON daemon"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name mon.{{ ceph_bootstrap_node | split('.') | first }} --skip-pull
+    cephadm adopt --style legacy --name mon.{{ ceph_bootstrap_node | split('.') | first }}
+    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
   when:
     - inventory_hostname == ceph_bootstrap_node
     - _needs_mon_adopt | default(false)
@@ -155,7 +156,8 @@
 
 - name: "Migration: adopt bootstrap MGR daemon"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name mgr.{{ ceph_bootstrap_node | split('.') | first }} --skip-pull
+    cephadm adopt --style legacy --name mgr.{{ ceph_bootstrap_node | split('.') | first }}
+    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
   when:
     - inventory_hostname == ceph_bootstrap_node
     - _needs_mon_adopt | default(false)
@@ -236,6 +238,18 @@
     (_orch_status.stdout | trim | default('{}') | from_yaml).backend | default('') != 'cephadm'
   changed_when: true
 
+# Pin the cluster-wide image base so any daemon cephadm creates later
+# (rgw via `orch apply rgw`, nfs via `ceph nfs cluster create`, mds via
+# spec apply) uses the configured image, not cephadm's hard-coded
+# DEFAULT_IMAGE or whatever a containerized legacy daemon happened to
+# be running.
+- name: "Migration: pin cluster container image base"
+  ansible.builtin.command: >
+    ceph config set mgr mgr/cephadm/container_image_base {{ ceph_container_image }}
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: true
+
 - name: "Migration: configure cephadm SSH user"
   ansible.builtin.command: >
     ceph cephadm set-user {{ ceph_cephadm_user }}
@@ -302,7 +316,8 @@
 
 - name: "Migration: adopt each legacy OSD on this node"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name osd.{{ item }} --skip-pull
+    cephadm adopt --style legacy --name osd.{{ item }}
+    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
   loop: >-
     {{ (_node_osd_list.stdout | default('{}') | from_json).keys() | list }}
   when:
@@ -337,7 +352,8 @@
 
 - name: "Migration: adopt MDS daemon on this node"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name mds.{{ inventory_hostname | split('.') | first }} --skip-pull
+    cephadm adopt --style legacy --name mds.{{ inventory_hostname | split('.') | first }}
+    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
   when:
     - _needs_mds_adopt | default(false)
   changed_when: true
