@@ -13,16 +13,17 @@
 # protocols=[4], transports=[TCP], fsal=CEPH+fs_name. We rely on
 # those defaults rather than passing extra flags.
 
-- name: "Get existing exports for cluster {{ _nfs_fs.name }}"
-  ansible.builtin.command: ceph nfs export ls {{ _nfs_fs.name }} --format json
-  register: _existing_exports
-  changed_when: false
-
 - name: "Set desired pseudo path for {{ _nfs_fs.name }}"
   ansible.builtin.set_fact:
     _nfs_pseudo: "{{ _nfs_fs.nfs_export | default('/' + _nfs_fs.name) }}"
     _nfs_path: "{{ _nfs_fs.nfs_root | default('/') }}"
 
+# `ceph nfs export create` is safe to run when the export already
+# exists (it returns rc=0 with stderr "Export already exists").
+# Decide changed-vs-not by stderr instead of pre-checking with
+# `ceph nfs export ls`, which is brittle around path normalization
+# (e.g. ceph stores `/cloudstack` for an inventory value of
+# `/cloudstack/`).
 - name: "Create NFS export for cluster {{ _nfs_fs.name }}"
   ansible.builtin.command: >
     ceph nfs export create cephfs
@@ -30,5 +31,5 @@
     --pseudo-path {{ _nfs_pseudo }}
     --path {{ _nfs_path }}
     --fsname {{ _nfs_fs.name }}
-  when: _nfs_pseudo not in (_existing_exports.stdout | default('[]') | from_json)
-  changed_when: true
+  register: _nfs_export_create
+  changed_when: "'already exists' not in (_nfs_export_create.stderr | default(''))"
