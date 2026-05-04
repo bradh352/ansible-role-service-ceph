@@ -10,9 +10,12 @@
     _registered_hosts: >-
       {{ _orch_hosts.stdout | from_json | map(attribute='hostname') | list }}
 
+# cephadm orch host add accepts `<hostname> [<addr>]` and DNS-resolves
+# the hostname when addr is omitted. OSD-only hosts have no ceph_mon_ip
+# defined, so skip the addr arg in that case rather than guessing.
 - name: "Add current host to cephadm orchestrator"
-  ansible.builtin.command: >
-    ceph orch host add {{ inventory_hostname }} {{ ceph_mon_ip | default(ansible_host) }}
+  ansible.builtin.command: >-
+    ceph orch host add {{ inventory_hostname }}{% if ceph_mon_ip is defined %} {{ ceph_mon_ip }}{% endif %}
   when: inventory_hostname not in _registered_hosts
   changed_when: true
   delegate_to: "{{ ceph_bootstrap_node }}"

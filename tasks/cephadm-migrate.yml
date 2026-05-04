@@ -294,9 +294,13 @@
   run_once: true
   delegate_to: "{{ ceph_bootstrap_node }}"
 
+# cephadm orch host add accepts `<hostname> [<addr>]`. We address hosts
+# by FQDN (see the FQDN-handling note in cephadm-host-labels.yml), so
+# DNS resolves the hostname and the addr arg is optional. Omit it when
+# ceph_mon_ip isn't defined (OSD-only hosts don't carry a MON IP).
 - name: "Migration: add host to orchestrator"
-  ansible.builtin.command: >
-    ceph orch host add {{ inventory_hostname }} {{ ceph_mon_ip }}
+  ansible.builtin.command: >-
+    ceph orch host add {{ inventory_hostname }}{% if ceph_mon_ip is defined %} {{ ceph_mon_ip }}{% endif %}
   when: >-
     inventory_hostname not in
     (_migrate_orch_hosts.stdout | from_json | map(attribute='hostname') | list)
