@@ -1,6 +1,11 @@
 ---
+# service_id must match the value passed as the first arg to
+# `ceph orch apply rgw <id>` in cephadm-migrate.yml (the realm name),
+# otherwise the migration creates `rgw.<realm>` and a subsequent run
+# of this template creates a second service `rgw.<zone>` that
+# collides on `rgw_frontend_port` and fails to deploy.
 service_type: rgw
-service_id: {{ ceph_rgw['zone'] }}
+service_id: {{ ceph_rgw['realm'] }}
 placement:
   label: rgw
 spec:
