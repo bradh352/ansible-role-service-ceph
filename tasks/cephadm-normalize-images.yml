@@ -9,6 +9,21 @@
 # `ceph orch redeploy <service>` does not accept --image; only the
 # daemon-level `ceph orch daemon redeploy <daemon_name> [<image>]`
 # form does. Operate per-daemon so we can pin the image explicitly.
+#
+# Compare daemons by `container_image_id` (the image's content hash)
+# rather than `container_image_name`. cephadm records the running
+# image as a tag (`:v19`, `:v19.2.3`) or a digest reference
+# (`@sha256:...`) depending on how the daemon was deployed, so any
+# name-based match would either miss valid daemons (digest form) or
+# accept the wrong daemon (different image with the same name).
+
+- name: "Resolve image_id for the configured ceph image"
+  ansible.builtin.command: >
+    podman image inspect {{ ceph_container_image }}:v{{ ceph_version }}
+    --format {{ '{{' }}.Id{{ '}}' }}
+  register: _expected_image_id
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
 
 - name: "Get current daemon image inventory"
   ansible.builtin.command: ceph orch ps --format json
@@ -20,7 +35,7 @@
   ansible.builtin.set_fact:
     _daemons_needing_redeploy: >-
       {{ (_orch_ps_normalize.stdout | from_json)
-         | rejectattr('container_image_name', 'match', '^' + (ceph_container_image | regex_escape) + ':')
+         | rejectattr('container_image_id', 'equalto', _expected_image_id.stdout | trim)
          | map(attribute='daemon_name') | list }}
 
 - name: "Redeploy mismatched daemons with correct image"
@@ -31,21 +46,19 @@
   delegate_to: "{{ ceph_bootstrap_node }}"
   changed_when: true
 
-# Daemons mid-redeploy may have missing keys (no container_image_name,
-# no status_desc), so coerce to empty/non-running before comparing.
+# Daemons mid-redeploy may have missing keys (no container_image_id,
+# no status_desc), so coerce to non-matching/non-running before comparing.
 - name: "Wait for redeployed daemons to settle on the configured image"
   ansible.builtin.command: ceph orch ps --format json
   register: _orch_ps_post_redeploy
   vars:
     _post_daemons: "{{ _orch_ps_post_redeploy.stdout | default('[]') | from_json }}"
-    _expected_image_re: "^{{ ceph_container_image | regex_escape }}:"
+    _expected_id: "{{ _expected_image_id.stdout | trim }}"
   until: >-
-    (_post_daemons | rejectattr('container_image_name', 'defined') | list | length == 0)
-    and
     (_post_daemons
-     | selectattr('container_image_name', 'defined')
-     | rejectattr('container_image_name', 'match', _expected_image_re)
-     | list | length == 0)
+     | selectattr('container_image_id', 'defined')
+     | selectattr('container_image_id', 'equalto', _expected_id)
+     | list | length == _post_daemons | length)
     and
     (_post_daemons
      | selectattr('status_desc', 'defined')
