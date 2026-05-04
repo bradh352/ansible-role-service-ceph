@@ -103,30 +103,34 @@
 - name: "Set per-daemon migration flags"
   ansible.builtin.set_fact:
     _cephadm_units_present: "{{ _cephadm_units.stdout_lines | length > 0 }}"
+    # Backslashes in the regex must be single (`\.`) not double (`\\.`):
+    # YAML `>-` folded scalars pass backslashes through verbatim, so Jinja
+    # sees a literal double-backslash and produces a regex that won't
+    # match `ceph-<uuid>@<type>.<n>.service` unit names.
     _needs_mon_adopt: >-
       {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] and
          (_legacy_mon_dir.stat.exists | default(false)) and
          not (_cephadm_units.stdout_lines
-              | select('match', 'ceph-' + (ceph_uuid | lower) + '@mon\\..*\\.service')
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@mon\..*\.service')
               | list | length > 0) }}
     _needs_osd_adopt: >-
       {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] and
          ((_legacy_osd_list.stdout | default('{}', true)) | from_json | length > 0) and
          not (_cephadm_units.stdout_lines
-              | select('match', 'ceph-' + (ceph_uuid | lower) + '@osd\\..*\\.service')
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@osd\..*\.service')
               | list | length > 0) }}
     _needs_mds_adopt: >-
       {{ inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] and
          (_legacy_mds_dir.stat.exists | default(false)) and
          not (_cephadm_units.stdout_lines
-              | select('match', 'ceph-' + (ceph_uuid | lower) + '@mds\\..*\\.service')
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@mds\..*\.service')
               | list | length > 0) }}
     _needs_rgw_adopt: >-
       {{ groups['ceph_' + ceph_cluster_name + '_rgw'] is defined and
          inventory_hostname in groups['ceph_' + ceph_cluster_name + '_rgw'] and
          (_legacy_rgw_dir.stat.exists | default(false)) and
          not (_cephadm_units.stdout_lines
-              | select('match', 'ceph-' + (ceph_uuid | lower) + '@rgw\\..*\\.service')
+              | select('match', 'ceph-' + (ceph_uuid | lower) + '@rgw\..*\.service')
               | list | length > 0) }}
     _needs_nfs_adopt: >-
       {{ groups['ceph_' + ceph_cluster_name + '_mds'] is defined and
