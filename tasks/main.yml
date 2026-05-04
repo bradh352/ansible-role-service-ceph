@@ -387,7 +387,6 @@
 
 - name: "Validate and apply CRUSH topology"
   ansible.builtin.include_tasks: cephadm-crush.yml
-  when: inventory_hostname == ceph_bootstrap_node
 
 # -----------------------------------------------------------------------
 # Image normalization (bootstrap node)

@@ -1,23 +1,109 @@
 ---
-- name: "Get OSD IDs"
-  ansible.builtin.command: >
-    ceph osd ls-tree {{ inventory_hostname | split('.') | first }} --format json
-  register: _host_osd_ids
+# Two passes:
+#
+#   1. Cluster-wide: relocate any OSD whose CRUSH host bucket doesn't
+#      match the machine it's actually running on. This catches OSDs
+#      that drifted because of the legacy `crush_location` global-config
+#      bug (see cephadm-migrate.yml).
+#
+#   2. Per-host: ensure this host's CRUSH bucket sits at the configured
+#      rack/room/chassis location.
+#
+# Both passes use `ceph osd metadata` rather than `ceph osd ls-tree
+# <host>` to enumerate OSDs, because ls-tree reads the (possibly stale)
+# CRUSH placement and would miss OSDs that are misplaced under the
+# wrong host bucket. metadata reports the physical hostname the OSD
+# itself observed at startup.
+#
+# All ceph commands delegate to the bootstrap node so this file can run
+# on hosts without a local admin keyring (e.g. OSD-only nodes).
+
+# -----------------------------------------------------------------------
+# Pass 1: cluster-wide OSD-to-host-bucket reconciliation
+# -----------------------------------------------------------------------
+
+- name: "Get cluster OSD list"
+  ansible.builtin.command: ceph osd ls --format json
+  register: _all_osd_ids
   changed_when: false
-  failed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  run_once: true
 
-- name: "Skip crush update if no OSDs found"
-  ansible.builtin.meta: noop
-  when: (_host_osd_ids.stdout | default('[]') | from_json | length) == 0
+- name: "Get all OSD metadata (physical host per OSD)"
+  ansible.builtin.command: ceph osd metadata --format json
+  register: _all_osd_metadata
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  run_once: true
 
-- name: "Get current CRUSH location "
+- name: "Get current CRUSH location for each OSD"
+  ansible.builtin.command: ceph osd find {{ item }} --format json
+  register: _all_osd_finds
+  loop: "{{ _all_osd_ids.stdout | from_json }}"
+  loop_control:
+    label: "osd.{{ item }}"
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  run_once: true
+
+- name: "Determine OSDs whose CRUSH host bucket doesn't match physical host"
+  ansible.builtin.set_fact:
+    _misplaced_osds: >-
+      {%- set out = [] -%}
+      {%- set metas = _all_osd_metadata.stdout | from_json -%}
+      {%- for find in _all_osd_finds.results -%}
+        {%- set osd_id = find.item -%}
+        {%- set crush_host = (find.stdout | from_json).crush_location.host | default('') -%}
+        {%- set match = metas | selectattr('id', 'equalto', osd_id) | list -%}
+        {%- if match -%}
+          {%- set phys_host = (match[0].hostname | default('')) | split('.') | first -%}
+          {%- if phys_host and crush_host and phys_host != crush_host -%}
+            {%- set _ = out.append({'osd': osd_id, 'wrong': crush_host, 'correct': phys_host}) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  run_once: true
+
+- name: "Move misplaced OSDs to their physical host's CRUSH bucket"
   ansible.builtin.command: >
-    ceph osd find {{ _host_osd_ids.stdout | from_json | first }} --format json
+    ceph osd crush move osd.{{ item.osd }} host={{ item.correct }}
+  loop: "{{ _misplaced_osds | default([]) }}"
+  loop_control:
+    label: "osd.{{ item.osd }}: host={{ item.wrong }} -> host={{ item.correct }}"
+  changed_when: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  run_once: true
+
+# -----------------------------------------------------------------------
+# Pass 2: per-host bucket placement (rack/room/chassis/etc.)
+# -----------------------------------------------------------------------
+
+- name: "Find OSDs running on this host (by physical hostname)"
+  ansible.builtin.set_fact:
+    _host_osd_ids: >-
+      {%- set out = [] -%}
+      {%- set short_hostname = inventory_hostname | split('.') | first -%}
+      {%- for m in (_all_osd_metadata.stdout | from_json) -%}
+        {%- set host = m.hostname | default('') | split('.') | first -%}
+        {%- if host == short_hostname -%}
+          {%- set _ = out.append(m.id) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "Skip per-host bucket update if no OSDs run here"
+  ansible.builtin.meta: noop
+  when: _host_osd_ids | length == 0
+
+- name: "Get current CRUSH location for this host's first OSD"
+  ansible.builtin.command: ceph osd find {{ _host_osd_ids | first }} --format json
   register: _osd_find
   changed_when: false
-  when: (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  when: _host_osd_ids | length > 0
 
-- name: "Build desired CRUSH location"
+- name: "Build desired CRUSH location for this host"
   ansible.builtin.set_fact:
     _desired_crush: >-
       {%- set loc = {'root': 'default'} -%}
@@ -34,9 +120,9 @@
         {%- set _ = loc.update({'room': ceph_osd_room}) -%}
       {%- endif -%}
       {{ loc }}
-  when: (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+  when: _host_osd_ids | length > 0
 
-- name: "Check if CRUSH location needs update"
+- name: "Check if this host's bucket needs a topology move"
   ansible.builtin.set_fact:
     _crush_needs_update: >-
       {%- set current = (_osd_find.stdout | from_json).crush_location | default({}) -%}
@@ -47,13 +133,14 @@
         {%- endif -%}
       {%- endfor -%}
       {{ current_filtered != _desired_crush }}
-  when: (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+  when: _host_osd_ids | length > 0
 
-- name: "Update CRUSH location"
+- name: "Move this host's CRUSH bucket to the desired topology"
   ansible.builtin.command: >
     ceph osd crush move {{ inventory_hostname | split('.') | first }}
     {% for k, v in _desired_crush.items() %}{{ k }}={{ v }} {% endfor %}
   when:
-    - (_host_osd_ids.stdout | default('[]') | from_json | length) > 0
+    - _host_osd_ids | length > 0
     - _crush_needs_update | default(false) | bool
   changed_when: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
