@@ -213,9 +213,19 @@
 
 # --- Pre-pull container image ---
 
+# `cephadm pull` always logs "Pulling container image..." to stderr, even
+# when the image is already cached locally, so we can't use stderr to
+# decide whether the run was a no-op. Probe with `podman image exists`
+# first and skip the pull when it's already present.
+- name: "Check if ceph container image is already present"
+  ansible.builtin.command: >
+    podman image exists {{ ceph_container_image }}:v{{ ceph_version }}
+  register: _ceph_image_present
+  changed_when: false
+  failed_when: false
+
 - name: "Pre-pull ceph container image on all nodes"
   ansible.builtin.command: >
     cephadm --image {{ ceph_container_image }}:v{{ ceph_version }} pull
-  register: _pull_result
-  changed_when: "'Pulling' in _pull_result.stderr"
-  failed_when: _pull_result.rc != 0
+  when: _ceph_image_present.rc != 0
+  changed_when: true
