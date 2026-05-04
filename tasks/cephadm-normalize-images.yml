@@ -5,6 +5,10 @@
 # (e.g. docker.io/ceph/daemon-base:latest-master-devel from the older
 # ceph-ansible containerized model) as a per-daemon override that
 # `ceph orch upgrade` then refused to touch.
+#
+# `ceph orch redeploy <service>` does not accept --image; only the
+# daemon-level `ceph orch daemon redeploy <daemon_name> [<image>]`
+# form does. Operate per-daemon so we can pin the image explicitly.
 
 - name: "Get current daemon image inventory"
   ansible.builtin.command: ceph orch ps --format json
@@ -12,18 +16,18 @@
   changed_when: false
   delegate_to: "{{ ceph_bootstrap_node }}"
 
-- name: "Find services with daemons not on the configured ceph image"
+- name: "Find daemons not on the configured ceph image"
   ansible.builtin.set_fact:
-    _services_needing_redeploy: >-
+    _daemons_needing_redeploy: >-
       {{ (_orch_ps_normalize.stdout | from_json)
          | rejectattr('container_image_name', 'match', '^' + (ceph_container_image | regex_escape) + ':')
-         | map(attribute='service_name') | unique | list }}
+         | map(attribute='daemon_name') | list }}
 
-- name: "Redeploy mismatched services with correct image"
+- name: "Redeploy mismatched daemons with correct image"
   ansible.builtin.command: >
-    ceph orch redeploy {{ item }} --image {{ ceph_container_image }}:v{{ ceph_version }}
-  loop: "{{ _services_needing_redeploy }}"
-  when: _services_needing_redeploy | length > 0
+    ceph orch daemon redeploy {{ item }} {{ ceph_container_image }}:v{{ ceph_version }}
+  loop: "{{ _daemons_needing_redeploy }}"
+  when: _daemons_needing_redeploy | length > 0
   delegate_to: "{{ ceph_bootstrap_node }}"
   changed_when: true
 
@@ -43,4 +47,4 @@
   delay: 15
   changed_when: false
   delegate_to: "{{ ceph_bootstrap_node }}"
-  when: _services_needing_redeploy | length > 0
+  when: _daemons_needing_redeploy | length > 0
