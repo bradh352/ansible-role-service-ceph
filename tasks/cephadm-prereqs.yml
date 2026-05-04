@@ -73,7 +73,9 @@
 
 - name: "Enable Ubuntu universe repo (provides cephadm on Ubuntu)"
   ansible.builtin.apt_repository:
-    repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_facts['distribution_release'] }} universe"
+    repo: >-
+      deb {{ (mirror_ubuntu | default('http://archive.ubuntu.com/ubuntu')) | regex_replace('/$', '') }}
+      {{ ansible_facts['distribution_release'] }} universe
     state: present
     update_cache: true
   when: ansible_facts['distribution'] == 'Ubuntu'
