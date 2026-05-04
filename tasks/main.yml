@@ -140,9 +140,16 @@
               | select('match', 'ceph-' + (ceph_uuid | lower) + '@nfs')
               | list | length > 0) }}
 
+# Compute the deployment mode on every host rather than once-and-broadcast:
+# the prior `run_once: true` set the fact only on the first host *in the play*,
+# but the broadcast then read it from `hostvars[<first MON in the inventory
+# group>]` -- which fails when the play targets a subset of MONs (e.g. a single
+# host being migrated). The expression is a pure function of `groups` and
+# `hostvars` with `default=false` on missing flags, so each host computes the
+# same value on its own.
 - name: "Compute cluster-wide deployment mode"
   ansible.builtin.set_fact:
-    _cluster_mode: >-
+    ceph_deployment_mode: >-
       {%- set mon_legacy = groups['ceph_' + ceph_cluster_name + '_mon']
             | map('extract', hostvars)
             | map(attribute='_needs_mon_adopt', default=false)
@@ -166,12 +173,6 @@
       {%- if mon_legacy or osd_legacy or mds_legacy or rgw_legacy -%}legacy
       {%- elif any_cephadm -%}cephadm
       {%- else -%}fresh{%- endif -%}
-  run_once: true
-
-- name: "Broadcast deployment mode to all hosts"
-  ansible.builtin.set_fact:
-    ceph_deployment_mode: >-
-      {{ hostvars[groups['ceph_' + ceph_cluster_name + '_mon'] | sort | first]['_cluster_mode'] }}
 
 # -----------------------------------------------------------------------
 # Bootstrap node election
