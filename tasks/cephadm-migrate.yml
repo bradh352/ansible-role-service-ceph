@@ -147,8 +147,8 @@
 
 - name: "Migration: adopt bootstrap MON daemon"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name mon.{{ ceph_bootstrap_node | split('.') | first }}
-    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
+    cephadm --image {{ ceph_container_image }}:v{{ ceph_version }}
+    adopt --style legacy --name mon.{{ ceph_bootstrap_node | split('.') | first }} --skip-pull
   when:
     - inventory_hostname == ceph_bootstrap_node
     - _needs_mon_adopt | default(false)
@@ -156,8 +156,8 @@
 
 - name: "Migration: adopt bootstrap MGR daemon"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name mgr.{{ ceph_bootstrap_node | split('.') | first }}
-    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
+    cephadm --image {{ ceph_container_image }}:v{{ ceph_version }}
+    adopt --style legacy --name mgr.{{ ceph_bootstrap_node | split('.') | first }} --skip-pull
   when:
     - inventory_hostname == ceph_bootstrap_node
     - _needs_mon_adopt | default(false)
@@ -316,8 +316,8 @@
 
 - name: "Migration: adopt each legacy OSD on this node"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name osd.{{ item }}
-    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
+    cephadm --image {{ ceph_container_image }}:v{{ ceph_version }}
+    adopt --style legacy --name osd.{{ item }} --skip-pull
   loop: >-
     {{ (_node_osd_list.stdout | default('{}') | from_json).keys() | list }}
   when:
@@ -352,8 +352,8 @@
 
 - name: "Migration: adopt MDS daemon on this node"
   ansible.builtin.command: >
-    cephadm adopt --style legacy --name mds.{{ inventory_hostname | split('.') | first }}
-    --image {{ ceph_container_image }}:v{{ ceph_version }} --skip-pull
+    cephadm --image {{ ceph_container_image }}:v{{ ceph_version }}
+    adopt --style legacy --name mds.{{ inventory_hostname | split('.') | first }} --skip-pull
   when:
     - _needs_mds_adopt | default(false)
   changed_when: true
