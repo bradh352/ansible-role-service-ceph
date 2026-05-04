@@ -331,11 +331,15 @@
 - name: "Register hosts and labels with orchestrator"
   ansible.builtin.include_tasks: cephadm-hosts.yml
 
+# Apply specs even during legacy migration. By the time main.yml reaches
+# this point, cephadm-migrate.yml has adopted the bootstrap MON+MGR and
+# enabled the orchestrator. Running the spec apply here lets cephadm
+# reconcile against already-adopted daemons and keeps the role's end
+# state identical between a one-shot migration run and a post-migration
+# re-run.
 - name: "Apply service specs"
   ansible.builtin.include_tasks: cephadm-services.yml
-  when:
-    - ceph_deployment_mode != 'legacy'
-    - inventory_hostname == ceph_bootstrap_node
+  when: inventory_hostname == ceph_bootstrap_node
 
 # -----------------------------------------------------------------------
 # Pools, CephFS (bootstrap node)

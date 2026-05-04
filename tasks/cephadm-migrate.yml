@@ -64,6 +64,20 @@
     - inventory_hostname == ceph_bootstrap_node
     - _needs_mon_adopt | default(false)
 
+# The legacy per-host `templates/ceph.conf.j2` puts a host-specific
+# `crush_location = ... host=<this host>` line in [global]. When the
+# bootstrap host's ceph.conf is assimilated above, that value lands in
+# the cluster-wide global config DB, so every OSD in the cluster --
+# including those on other nodes -- reads it on startup
+# (osd_crush_update_on_start defaults to true) and silently relocates
+# itself under host=<bootstrap host> in CRUSH. Strip the global setting
+# so OSDs fall back to the hostname-based default.
+- name: "Migration: strip stale global crush_location after assimilation"
+  ansible.builtin.command: ceph config rm global crush_location
+  changed_when: true
+  failed_when: false
+  when: inventory_hostname == ceph_bootstrap_node
+
 
 # -----------------------------------------------------------------------
 # UID Migration
