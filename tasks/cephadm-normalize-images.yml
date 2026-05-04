@@ -31,18 +31,26 @@
   delegate_to: "{{ ceph_bootstrap_node }}"
   changed_when: true
 
+# Daemons mid-redeploy may have missing keys (no container_image_name,
+# no status_desc), so coerce to empty/non-running before comparing.
 - name: "Wait for redeployed daemons to settle on the configured image"
   ansible.builtin.command: ceph orch ps --format json
   register: _orch_ps_post_redeploy
+  vars:
+    _post_daemons: "{{ _orch_ps_post_redeploy.stdout | default('[]') | from_json }}"
+    _expected_image_re: "^{{ ceph_container_image | regex_escape }}:"
   until: >-
-    (_orch_ps_post_redeploy.stdout | from_json)
-    | rejectattr('container_image_name', 'match', '^' + (ceph_container_image | regex_escape) + ':')
-    | list | length == 0
+    (_post_daemons | rejectattr('container_image_name', 'defined') | list | length == 0)
     and
-    (_orch_ps_post_redeploy.stdout | from_json)
-    | selectattr('status_desc', 'equalto', 'running')
-    | list | length ==
-    (_orch_ps_post_redeploy.stdout | from_json) | list | length
+    (_post_daemons
+     | selectattr('container_image_name', 'defined')
+     | rejectattr('container_image_name', 'match', _expected_image_re)
+     | list | length == 0)
+    and
+    (_post_daemons
+     | selectattr('status_desc', 'defined')
+     | selectattr('status_desc', 'equalto', 'running')
+     | list | length == _post_daemons | length)
   retries: 60
   delay: 15
   changed_when: false
