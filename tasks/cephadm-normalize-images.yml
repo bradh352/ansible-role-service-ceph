@@ -16,6 +16,12 @@
 # (`@sha256:...`) depending on how the daemon was deployed, so any
 # name-based match would either miss valid daemons (digest form) or
 # accept the wrong daemon (different image with the same name).
+#
+# Run the scan/redeploy/wait sequence in multiple passes. cephadm
+# reconciles daemon placement asynchronously after spec applies, so a
+# daemon cephadm queues during pass N (scan saw it absent, but it gets
+# deployed before our wait completes) needs pass N+1 to catch it. Two
+# passes covers the common case; a third is cheap insurance.
 
 - name: "Resolve image_id for the configured ceph image"
   ansible.builtin.command: >
@@ -25,47 +31,30 @@
   changed_when: false
   delegate_to: "{{ ceph_bootstrap_node }}"
 
-- name: "Get current daemon image inventory"
+- name: "Run normalize-images passes"
+  ansible.builtin.include_tasks: cephadm-normalize-images-pass.yml
+  loop: [1, 2, 3]
+  loop_control:
+    loop_var: _normalize_pass
+
+- name: "Final scan to verify all daemons are on the configured image"
   ansible.builtin.command: ceph orch ps --format json
-  register: _orch_ps_normalize
+  register: _normalize_final
   changed_when: false
   delegate_to: "{{ ceph_bootstrap_node }}"
 
-- name: "Find daemons not on the configured ceph image"
-  ansible.builtin.set_fact:
-    _daemons_needing_redeploy: >-
-      {{ (_orch_ps_normalize.stdout | from_json)
+- name: "Assert no daemons remain on a mismatched image"
+  ansible.builtin.assert:
+    that: >-
+      (_normalize_final.stdout | from_json)
+      | selectattr('container_image_id', 'defined')
+      | rejectattr('container_image_id', 'equalto', _expected_image_id.stdout | trim)
+      | list | length == 0
+    fail_msg: >-
+      Daemons still running a container image other than
+      {{ ceph_container_image }}:v{{ ceph_version }} after three
+      normalize passes:
+      {{ (_normalize_final.stdout | from_json)
+         | selectattr('container_image_id', 'defined')
          | rejectattr('container_image_id', 'equalto', _expected_image_id.stdout | trim)
          | map(attribute='daemon_name') | list }}
-
-- name: "Redeploy mismatched daemons with correct image"
-  ansible.builtin.command: >
-    ceph orch daemon redeploy {{ item }} {{ ceph_container_image }}:v{{ ceph_version }}
-  loop: "{{ _daemons_needing_redeploy }}"
-  when: _daemons_needing_redeploy | length > 0
-  delegate_to: "{{ ceph_bootstrap_node }}"
-  changed_when: true
-
-# Daemons mid-redeploy may have missing keys (no container_image_id,
-# no status_desc), so coerce to non-matching/non-running before comparing.
-- name: "Wait for redeployed daemons to settle on the configured image"
-  ansible.builtin.command: ceph orch ps --format json
-  register: _orch_ps_post_redeploy
-  vars:
-    _post_daemons: "{{ _orch_ps_post_redeploy.stdout | default('[]') | from_json }}"
-    _expected_id: "{{ _expected_image_id.stdout | trim }}"
-  until: >-
-    (_post_daemons
-     | selectattr('container_image_id', 'defined')
-     | selectattr('container_image_id', 'equalto', _expected_id)
-     | list | length == _post_daemons | length)
-    and
-    (_post_daemons
-     | selectattr('status_desc', 'defined')
-     | selectattr('status_desc', 'equalto', 'running')
-     | list | length == _post_daemons | length)
-  retries: 60
-  delay: 15
-  changed_when: false
-  delegate_to: "{{ ceph_bootstrap_node }}"
-  when: _daemons_needing_redeploy | length > 0
