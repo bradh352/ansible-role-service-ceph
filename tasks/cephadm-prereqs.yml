@@ -173,10 +173,16 @@
   run_once: true
   changed_when: false
 
+# The Read tasks above use `run_once: true`, which records the registered
+# vars on whichever host the task ran on -- the *first host in the play*,
+# not the first MON in the inventory. When the play is a strict subset
+# (e.g. only node2), the inventory's first MON (node1) isn't in the play
+# and the cross-host hostvars lookup fails. Use `ansible_play_hosts_all
+# | first` so we look on the same host run_once chose.
 - name: "Broadcast SSH key facts to all hosts"
   ansible.builtin.set_fact:
-    _cephadm_privkey_b64_data: "{{ hostvars[groups['ceph_' + ceph_cluster_name + '_mon'] | sort | first]['_cephadm_privkey_b64'].stdout }}"
-    _cephadm_pubkey_data: "{{ hostvars[groups['ceph_' + ceph_cluster_name + '_mon'] | sort | first]['_cephadm_pubkey'].stdout }}"
+    _cephadm_privkey_b64_data: "{{ hostvars[ansible_play_hosts_all | first]['_cephadm_privkey_b64'].stdout }}"
+    _cephadm_pubkey_data: "{{ hostvars[ansible_play_hosts_all | first]['_cephadm_pubkey'].stdout }}"
 
 - name: "Check if this MON node already has the private key"
   ansible.builtin.stat:
