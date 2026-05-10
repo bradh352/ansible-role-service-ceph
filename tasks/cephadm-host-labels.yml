@@ -1,0 +1,53 @@
+---
+# Apply orchestrator labels to the current host based on its inventory
+# group membership. Called from cephadm-hosts.yml (fresh/cephadm path)
+# and from cephadm-migrate.yml after each host's daemons have been
+# adopted, so cephadm can manage the adopted daemons against the spec.
+#
+# The rgw label is applied separately in the migration RGW block
+# because it is gated on the per-host adoption ordering.
+#
+# Use the FQDN to address the host: cephadm registers hosts by FQDN
+# (see `cephadm-migrate.yml: orch host add`), and `ceph orch host ls`
+# reports them by FQDN, so all idempotency comparisons must be FQDN
+# vs FQDN.
+
+- name: "Compute desired labels for this host"
+  ansible.builtin.set_fact:
+    _desired_host_labels: >-
+      {%- set ns = namespace(labels=[]) -%}
+      {%- if inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon'] -%}
+        {%- set ns.labels = ns.labels + ['mon', 'mgr'] -%}
+      {%- endif -%}
+      {%- if inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd'] -%}
+        {%- set ns.labels = ns.labels + ['osd'] -%}
+      {%- endif -%}
+      {%- if inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds'] -%}
+        {%- set ns.labels = ns.labels + ['mds'] -%}
+      {%- endif -%}
+      {%- if inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+            and ceph_nfs_exports | length > 0 -%}
+        {%- set ns.labels = ns.labels + ['nfs'] -%}
+      {%- endif -%}
+      {{ ns.labels }}
+
+- name: "Get current orchestrator host list"
+  ansible.builtin.command: ceph orch host ls --format json
+  register: _orch_hosts_for_labels
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Determine missing labels for this host"
+  ansible.builtin.set_fact:
+    _missing_host_labels: >-
+      {{ _desired_host_labels | difference(
+           _orch_hosts_for_labels.stdout | from_json
+           | selectattr('hostname', 'equalto', inventory_hostname)
+           | map(attribute='labels') | flatten) }}
+
+- name: "Apply missing daemon-type labels to current host"
+  ansible.builtin.command: >
+    ceph orch host label add {{ inventory_hostname }} {{ item }}
+  loop: "{{ _missing_host_labels }}"
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: true

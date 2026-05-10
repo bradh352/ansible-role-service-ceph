@@ -1,0 +1,77 @@
+---
+# One iteration of the normalize-images flow:
+#   1. wait for cephadm to be in steady state (no async deploys pending),
+#   2. scan,
+#   3. redeploy mismatched daemons with the configured image,
+#   4. wait for those redeploys to land.
+#
+# Called from cephadm-normalize-images.yml with `include_tasks` in a
+# loop so a daemon cephadm queues during pass N is caught by pass N+1.
+#
+# OSD services are intentionally excluded from the steady-state check:
+# the `osd` service ships as `<unmanaged>` (no `status.size`) and the
+# label-based osd spec can sit at running=0 even when fully populated,
+# so neither one converges to running == size.
+
+- name: "Pass {{ _normalize_pass }}: wait for cephadm to reach steady state"
+  ansible.builtin.command: ceph orch ls --format json
+  register: _orch_ls_steady
+  until: >-
+    {%- set ns = namespace(unsettled=0) -%}
+    {%- for svc in (_orch_ls_steady.stdout | default('[]') | from_json) -%}
+      {%- if svc.service_type != 'osd'
+             and svc.status is defined
+             and svc.status.size is defined
+             and svc.status.running != svc.status.size -%}
+        {%- set ns.unsettled = ns.unsettled + 1 -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {{ ns.unsettled == 0 }}
+  retries: 60
+  delay: 10
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Pass {{ _normalize_pass }}: scan daemons"
+  ansible.builtin.command: ceph orch ps --format json
+  register: _orch_ps_pass
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Pass {{ _normalize_pass }}: find daemons not on the configured image"
+  ansible.builtin.set_fact:
+    _pass_misplaced: >-
+      {{ (_orch_ps_pass.stdout | from_json)
+         | selectattr('container_image_id', 'defined')
+         | rejectattr('container_image_id', 'equalto', _expected_image_id.stdout | trim)
+         | map(attribute='daemon_name') | list }}
+
+- name: "Pass {{ _normalize_pass }}: redeploy mismatched daemons"
+  ansible.builtin.command: >
+    ceph orch daemon redeploy {{ item }} {{ ceph_container_image }}:v{{ ceph_version }}
+  loop: "{{ _pass_misplaced }}"
+  when: _pass_misplaced | length > 0
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  changed_when: true
+
+- name: "Pass {{ _normalize_pass }}: wait for redeploys to settle"
+  ansible.builtin.command: ceph orch ps --format json
+  register: _pass_post
+  vars:
+    _daemons: "{{ _pass_post.stdout | default('[]') | from_json }}"
+    _expected: "{{ _expected_image_id.stdout | trim }}"
+  until: >-
+    (_daemons
+     | selectattr('container_image_id', 'defined')
+     | selectattr('container_image_id', 'equalto', _expected)
+     | list | length == _daemons | length)
+    and
+    (_daemons
+     | selectattr('status_desc', 'defined')
+     | selectattr('status_desc', 'equalto', 'running')
+     | list | length == _daemons | length)
+  retries: 60
+  delay: 15
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  when: _pass_misplaced | length > 0

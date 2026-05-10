@@ -1,4 +1,12 @@
 ---
+- name: "Wait for at least one OSD before creating filesystems"
+  ansible.builtin.command: ceph osd stat --format json
+  register: _fs_osd_stat
+  until: (_fs_osd_stat.stdout | from_json).num_up_osds | default(0) | int > 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
 - name: "Retrieve ceph filesystems"
   ansible.builtin.command: "ceph fs ls -f json"
   register: ceph_existing_filesystems

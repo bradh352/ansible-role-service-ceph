@@ -1,0 +1,26 @@
+---
+# Per-host MON+MGR adoption. Caller (cephadm-migrate.yml) gates the
+# include on `_needs_mon_adopt` and uses `throttle: 1` to keep adoption
+# sequential so quorum is preserved across the cluster.
+
+- name: "Adopt MON daemon on {{ inventory_hostname | split('.') | first }}"
+  ansible.builtin.command: >
+    cephadm --image {{ ceph_container_image }}:v{{ ceph_version }}
+    adopt --style legacy --name mon.{{ inventory_hostname | split('.') | first }} --skip-pull
+  changed_when: true
+
+- name: "Adopt MGR daemon on {{ inventory_hostname | split('.') | first }}"
+  ansible.builtin.command: >
+    cephadm --image {{ ceph_container_image }}:v{{ ceph_version }}
+    adopt --style legacy --name mgr.{{ inventory_hostname | split('.') | first }} --skip-pull
+  changed_when: true
+
+- name: "Wait for quorum to restore after adopting {{ inventory_hostname | split('.') | first }}"
+  ansible.builtin.command: ceph quorum_status --format json
+  register: _quorum_check
+  until: >-
+    (_quorum_check.stdout | from_json).quorum | length >=
+    (groups['ceph_' + ceph_cluster_name + '_mon'] | length // 2 + 1)
+  retries: 30
+  delay: 10
+  changed_when: false

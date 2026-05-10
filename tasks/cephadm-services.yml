@@ -1,0 +1,91 @@
+---
+- name: "Apply MON placement spec"
+  ansible.builtin.shell: |
+    set -o pipefail
+    cat <<'SPECEOF' | ceph orch apply -i -
+    {{ lookup('template', 'mon-spec.yml.j2') }}
+    SPECEOF
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: "Apply MGR placement spec"
+  ansible.builtin.shell: |
+    set -o pipefail
+    cat <<'SPECEOF' | ceph orch apply -i -
+    {{ lookup('template', 'mgr-spec.yml.j2') }}
+    SPECEOF
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: "Apply OSD placement spec"
+  ansible.builtin.shell: |
+    set -o pipefail
+    cat <<'SPECEOF' | ceph orch apply -i -
+    {{ lookup('template', 'osd-spec.yml.j2') }}
+    SPECEOF
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: "Apply MDS placement specs"
+  ansible.builtin.shell: |
+    set -o pipefail
+    cat <<'SPECEOF' | ceph orch apply -i -
+    {{ lookup('template', 'mds-spec.yml.j2') }}
+    SPECEOF
+  args:
+    executable: /bin/bash
+  loop: "{{ ceph_fs | default([]) }}"
+  loop_control:
+    loop_var: fs
+  vars:
+    fs_name: "{{ fs.name }}"
+  when: ceph_fs is defined and ceph_fs | length > 0
+  changed_when: false
+
+- name: "Apply RGW placement spec"
+  ansible.builtin.shell: |
+    set -o pipefail
+    cat <<'SPECEOF' | ceph orch apply -i -
+    {{ lookup('template', 'rgw-spec.yml.j2') }}
+    SPECEOF
+  args:
+    executable: /bin/bash
+  when: ceph_rgw is defined
+  changed_when: false
+
+- name: "Wait for MON daemons to be running"
+  ansible.builtin.command: ceph orch ps --daemon-type mon --format json
+  register: _mon_ps
+  until: >-
+    (_mon_ps.stdout | from_json | length > 0) and
+    (_mon_ps.stdout | from_json | selectattr('status_desc', 'equalto', 'running') | list | length ==
+     _mon_ps.stdout | from_json | length)
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: "Wait for MGR daemons to be running"
+  ansible.builtin.command: ceph orch ps --daemon-type mgr --format json
+  register: _mgr_ps
+  until: >-
+    (_mgr_ps.stdout | from_json | length > 0) and
+    (_mgr_ps.stdout | from_json | selectattr('status_desc', 'equalto', 'running') | list | length ==
+     _mgr_ps.stdout | from_json | length)
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: "Wait for OSD daemons to be running"
+  ansible.builtin.command: ceph orch ps --daemon-type osd --format json
+  register: _osd_ps
+  until: >-
+    (_osd_ps.stdout | from_json | length > 0) and
+    (_osd_ps.stdout | from_json | selectattr('status_desc', 'equalto', 'running') | list | length ==
+     _osd_ps.stdout | from_json | length)
+  retries: 120
+  delay: 15
+  changed_when: false
+  when: groups['ceph_' + ceph_cluster_name + '_osd'] | length > 0

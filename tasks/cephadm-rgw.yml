@@ -1,0 +1,140 @@
+---
+- name: "Wait for RGW daemons to be running"
+  ansible.builtin.command: ceph orch ps --daemon-type rgw --format json
+  register: _rgw_ps
+  until: >-
+    (_rgw_ps.stdout | from_json | length > 0) and
+    (_rgw_ps.stdout | from_json | selectattr('status_desc', 'equalto', 'running') | list | length ==
+     _rgw_ps.stdout | from_json | length)
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: "Generate RGW endpoint list"
+  ansible.builtin.set_fact:
+    rgw_endpoints: >-
+      {%- set ns = namespace(items=[]) -%}
+      {%- for host in groups['ceph_' + ceph_cluster_name + '_rgw'] -%}
+        {%- set ns.items = ns.items + ['http://' ~ host ~ ':' ~ (ceph_rgw['port'] | default(7480))] -%}
+      {%- endfor -%}
+      {{ ns.items }}
+
+- name: "Check if realm exists"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin realm get --rgw-realm={{ ceph_rgw['realm'] }}
+  failed_when: false
+  changed_when: false
+  register: ceph_rgw_realm_get
+
+- name: "Create realm"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin realm create
+    --rgw-realm={{ ceph_rgw['realm'] }} --default
+  notify: "Commit RGW period"
+  when: ceph_rgw_realm_get.rc != 0
+  changed_when: true
+
+- name: "Load realm metadata"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin realm get --rgw-realm={{ ceph_rgw['realm'] }}
+  changed_when: false
+  register: ceph_rgw_realm_get
+
+- name: "Parse realm metadata"
+  ansible.builtin.set_fact:
+    ceph_rgw_realm: "{{ ceph_rgw_realm_get.stdout | from_json }}"
+
+- name: "Check if zonegroup exists"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin zonegroup get --rgw-zonegroup={{ ceph_rgw['zonegroup'] }}
+  failed_when: false
+  changed_when: false
+  register: ceph_rgw_zonegroup_get
+
+- name: "Create zonegroup"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin zonegroup create
+    --rgw-zonegroup={{ ceph_rgw['zonegroup'] }}
+    --rgw-realm={{ ceph_rgw['realm'] }}
+    --endpoints={{ rgw_endpoints | join(',') }}
+    --master --default
+  notify: "Commit RGW period"
+  when: ceph_rgw_zonegroup_get.rc != 0
+  changed_when: true
+
+- name: "Load zonegroup metadata"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin zonegroup get --rgw-zonegroup={{ ceph_rgw['zonegroup'] }}
+  changed_when: false
+  register: ceph_rgw_zonegroup_get
+
+- name: "Parse zonegroup metadata"
+  ansible.builtin.set_fact:
+    ceph_rgw_zonegroup: "{{ ceph_rgw_zonegroup_get.stdout | from_json }}"
+
+- name: "Update zonegroup endpoints if changed"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin zonegroup modify
+    --rgw-zonegroup={{ ceph_rgw['zonegroup'] }}
+    --rgw-realm={{ ceph_rgw['realm'] }}
+    --endpoints={{ rgw_endpoints | join(',') }}
+    --master --default
+  notify: "Commit RGW period"
+  when: >-
+    ceph_rgw_zonegroup['endpoints'] != rgw_endpoints or
+    not ceph_rgw_zonegroup['is_master'] or
+    ceph_rgw_zonegroup['realm_id'] != ceph_rgw_realm['id']
+  changed_when: true
+
+- name: "Check if zone exists"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin zone get --rgw-zone={{ ceph_rgw['zone'] }}
+  failed_when: false
+  changed_when: false
+  register: ceph_rgw_zone_get
+
+- name: "Create zone"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin zone create
+    --rgw-zonegroup={{ ceph_rgw['zonegroup'] }}
+    --endpoints={{ rgw_endpoints | join(',') }}
+    --rgw-zone={{ ceph_rgw['zone'] }}
+    --master --default
+  notify: "Commit RGW period"
+  when: ceph_rgw_zone_get.rc != 0
+  changed_when: true
+
+- name: "Load zone metadata from zonegroup"
+  ansible.builtin.shell: |
+    set -o pipefail
+    cephadm shell -- radosgw-admin zonegroup get \
+      --rgw-zonegroup={{ ceph_rgw['zonegroup'] }} \
+      | jq '.zones[] | select(.name == "{{ ceph_rgw["zone"] }}")'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  register: ceph_rgw_zone_get
+
+- name: "Parse zone metadata"
+  ansible.builtin.set_fact:
+    ceph_rgw_zone: "{{ ceph_rgw_zone_get.stdout | from_json }}"
+
+- name: "Update zone endpoints if changed"
+  ansible.builtin.command: >
+    cephadm shell -- radosgw-admin zone modify
+    --rgw-zonegroup={{ ceph_rgw['zonegroup'] }}
+    --endpoints={{ rgw_endpoints | join(',') }}
+    --rgw-zone={{ ceph_rgw['zone'] }}
+    --master --default
+  notify: "Commit RGW period"
+  when: ceph_rgw_zone['endpoints'] != rgw_endpoints
+  changed_when: true
+
+- name: "Flush handlers (commit period if needed)"
+  ansible.builtin.meta: flush_handlers
+
+- name: "UFW: Allow RGW traffic"
+  community.general.ufw:
+    rule: allow
+    port: "{{ ceph_rgw['port'] | default(7480) }}"
+    proto: tcp

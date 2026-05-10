@@ -1,5 +1,5 @@
 [global]
-fsid = {{ ceph_uuid }}
+fsid = {{ ceph_uuid | lower }}
 mon_initial_members = {{ ceph_bootstrap_node|split('.')|first }}
 {% set mon_ips = [] %}
 {% do mon_ips.append(hostvars[ceph_bootstrap_node]['ceph_mon_ip']) %}

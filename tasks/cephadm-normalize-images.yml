@@ -1,0 +1,60 @@
+---
+# Detect daemons running a container image outside of `ceph_container_image`
+# and force a redeploy with the configured image. This is the self-healing
+# step for clusters where adoption inherited a legacy containerized image
+# (e.g. docker.io/ceph/daemon-base:latest-master-devel from the older
+# ceph-ansible containerized model) as a per-daemon override that
+# `ceph orch upgrade` then refused to touch.
+#
+# `ceph orch redeploy <service>` does not accept --image; only the
+# daemon-level `ceph orch daemon redeploy <daemon_name> [<image>]`
+# form does. Operate per-daemon so we can pin the image explicitly.
+#
+# Compare daemons by `container_image_id` (the image's content hash)
+# rather than `container_image_name`. cephadm records the running
+# image as a tag (`:v19`, `:v19.2.3`) or a digest reference
+# (`@sha256:...`) depending on how the daemon was deployed, so any
+# name-based match would either miss valid daemons (digest form) or
+# accept the wrong daemon (different image with the same name).
+#
+# Run the scan/redeploy/wait sequence in multiple passes. cephadm
+# reconciles daemon placement asynchronously after spec applies, so a
+# daemon cephadm queues during pass N (scan saw it absent, but it gets
+# deployed before our wait completes) needs pass N+1 to catch it. Two
+# passes covers the common case; a third is cheap insurance.
+
+- name: "Resolve image_id for the configured ceph image"
+  ansible.builtin.command: >
+    podman image inspect {{ ceph_container_image }}:v{{ ceph_version }}
+    --format {{ '{{' }}.Id{{ '}}' }}
+  register: _expected_image_id
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Run normalize-images passes"
+  ansible.builtin.include_tasks: cephadm-normalize-images-pass.yml
+  loop: [1, 2, 3]
+  loop_control:
+    loop_var: _normalize_pass
+
+- name: "Final scan to verify all daemons are on the configured image"
+  ansible.builtin.command: ceph orch ps --format json
+  register: _normalize_final
+  changed_when: false
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+- name: "Assert no daemons remain on a mismatched image"
+  ansible.builtin.assert:
+    that: >-
+      (_normalize_final.stdout | from_json)
+      | selectattr('container_image_id', 'defined')
+      | rejectattr('container_image_id', 'equalto', _expected_image_id.stdout | trim)
+      | list | length == 0
+    fail_msg: >-
+      Daemons still running a container image other than
+      {{ ceph_container_image }}:v{{ ceph_version }} after three
+      normalize passes:
+      {{ (_normalize_final.stdout | from_json)
+         | selectattr('container_image_id', 'defined')
+         | rejectattr('container_image_id', 'equalto', _expected_image_id.stdout | trim)
+         | map(attribute='daemon_name') | list }}

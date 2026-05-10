@@ -1,0 +1,53 @@
+---
+
+- name: "Get currently deployed ceph version"
+  ansible.builtin.command: ceph version --format json
+  register: _ceph_ver_raw
+  changed_when: false
+
+- name: "Parse major.minor.rel from version string"
+  ansible.builtin.set_fact:
+    _ceph_deployed_ver: >-
+      {{ _ceph_ver_raw.stdout | from_json | json_query('version')
+         | regex_search('[0-9]+\.[0-9]+\.[0-9]+') }}
+
+# --- Legacy mode: assert deployed version matches ceph_version ---
+
+- name: "Legacy: assert deployed version matches ceph_version (no upgrade during migration)"
+  ansible.builtin.assert:
+    that: _ceph_deployed_ver == ceph_version
+    fail_msg: >-
+      Deployed Ceph {{ _ceph_deployed_ver }} does not match ceph_version={{ ceph_version }}.
+      Set ceph_version to match your installed version before migrating.
+      After migration completes you may bump ceph_version to trigger an upgrade.
+  when: ceph_deployment_mode == 'legacy'
+
+# --- cephadm mode: upgrade if ceph_version changed ---
+
+- name: "Cephadm: check if upgrade is already in progress"
+  ansible.builtin.command: ceph orch upgrade status --format json
+  register: _upgrade_status_check
+  changed_when: false
+  failed_when: _upgrade_status_check.rc != 0 and _upgrade_status_check.rc !=2
+  when: ceph_deployment_mode == 'cephadm'
+
+- name: "Cephadm: start upgrade if version tag differs"
+  ansible.builtin.command: >
+    ceph orch upgrade start --image {{ ceph_container_image }}:v{{ ceph_version }}
+  when:
+    - ceph_deployment_mode == 'cephadm'
+    - _ceph_deployed_ver != ceph_version
+    - not (_upgrade_status_check.stdout | trim | default('{}') | from_json).in_progress | default(false)
+  register: _upgrade_started
+  changed_when: true
+
+- name: "Cephadm: wait for upgrade to complete"
+  ansible.builtin.command: ceph orch upgrade status --format json
+  register: _upgrade_wait
+  until: not (_upgrade_wait.stdout | trim | from_json).in_progress | default(false)
+  retries: 120
+  delay: 30
+  changed_when: false
+  when:
+    - ceph_deployment_mode == 'cephadm'
+    - _upgrade_started is defined and _upgrade_started.changed | default(false)

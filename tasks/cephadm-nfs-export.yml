@@ -1,0 +1,35 @@
+---
+# `ceph nfs export create cephfs` is used here in preference to
+# `ceph nfs export apply -i <spec>`. The apply command has a bug
+# (observed on Ceph 19.2.x) where it writes the per-export rados
+# object (export-N) but does NOT update the cluster's conf-nfs.<id>
+# index that ganesha watches via RADOS_URLS.watch_url, so newly
+# applied exports are invisible to a running ganesha and even
+# survive a daemon redeploy. `create` updates the conf index and
+# triggers ganesha to reload via the rados watch.
+#
+# The defaults of `create cephfs` already match the legacy
+# templates/nfs.conf.j2: access_type=RW, squash=no_root_squash,
+# protocols=[4], transports=[TCP], fsal=CEPH+fs_name. We rely on
+# those defaults rather than passing extra flags.
+
+- name: "Set desired pseudo path for {{ _nfs_fs.name }}"
+  ansible.builtin.set_fact:
+    _nfs_pseudo: "{{ _nfs_fs.nfs_export | default('/' + _nfs_fs.name) }}"
+    _nfs_path: "{{ _nfs_fs.nfs_root | default('/') }}"
+
+# `ceph nfs export create` is safe to run when the export already
+# exists (it returns rc=0 with stderr "Export already exists").
+# Decide changed-vs-not by stderr instead of pre-checking with
+# `ceph nfs export ls`, which is brittle around path normalization
+# (e.g. ceph stores `/cloudstack` for an inventory value of
+# `/cloudstack/`).
+- name: "Create NFS export for cluster {{ _nfs_fs.name }}"
+  ansible.builtin.command: >
+    ceph nfs export create cephfs
+    --cluster-id {{ _nfs_fs.name }}
+    --pseudo-path {{ _nfs_pseudo }}
+    --path {{ _nfs_path }}
+    --fsname {{ _nfs_fs.name }}
+  register: _nfs_export_create
+  changed_when: "'already exists' not in (_nfs_export_create.stderr | default(''))"

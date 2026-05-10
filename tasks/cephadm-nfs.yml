@@ -1,0 +1,57 @@
+---
+- name: "Check existing NFS clusters"
+  ansible.builtin.command: ceph nfs cluster ls --format json
+  register: _nfs_clusters
+  changed_when: false
+  failed_when: false
+
+- name: "Create NFS cluster and .nfs pool if absent"
+  ansible.builtin.command: >
+    ceph nfs cluster create {{ item.name }} "label:nfs"
+  loop: "{{ ceph_fs | default([]) }}"
+  when:
+    - item.nfs | default(false)
+    - item.name not in (_nfs_clusters.stdout | default('[]') | from_json)
+  changed_when: true
+
+- name: "Wait for NFS daemons to be running"
+  ansible.builtin.command: ceph orch ps --daemon-type nfs --format json
+  register: _nfs_ps
+  until: >-
+    (_nfs_ps.stdout | from_json | length > 0) and
+    (_nfs_ps.stdout | from_json | selectattr('status_desc', 'equalto', 'running') | list | length ==
+     _nfs_ps.stdout | from_json | length)
+  retries: 60
+  delay: 10
+  changed_when: false
+  when: ceph_nfs_exports | length > 0
+
+- name: "Create CephFS subtrees for NFS exports"
+  ansible.builtin.shell: |
+    set -eo pipefail
+    mkdir -p /mnt/cephfs-temp
+    mount -t ceph "admin@.{{ item.name }}=/" /mnt/cephfs-temp
+    mkdir -p "/mnt/cephfs-temp/{{ item.nfs_root }}"
+    chmod 777 "/mnt/cephfs-temp/{{ item.nfs_root }}"
+    umount /mnt/cephfs-temp
+    rm -rf /mnt/cephfs-temp
+  args:
+    executable: /bin/bash
+  loop: "{{ ceph_fs | default([]) }}"
+  when:
+    - item.nfs | default(false)
+    - item.nfs_root is defined
+  changed_when: false
+
+- name: "Create NFS exports"
+  ansible.builtin.include_tasks: cephadm-nfs-export.yml
+  loop: "{{ ceph_fs | default([]) }}"
+  loop_control:
+    loop_var: _nfs_fs
+  when: _nfs_fs.nfs | default(false)
+
+- name: "UFW: Allow NFSv4 traffic"
+  community.general.ufw:
+    rule: allow
+    port: "2049"
+    proto: tcp

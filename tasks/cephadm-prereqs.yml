@@ -1,0 +1,230 @@
+---
+# --- Container runtime (podman) ---
+
+- name: "Install podman"
+  ansible.builtin.apt:
+    name: podman
+    state: present
+    update_cache: false
+
+- name: "Configure container registry mirror"
+  ansible.builtin.copy:
+    dest: /etc/containers/registries.conf.d/ceph-mirror.conf
+    content: |
+      [[registry]]
+      prefix = "quay.io/ceph"
+      location = "{{ ceph_container_image | regex_replace('/ceph$', '') }}"
+    mode: "0644"
+    owner: root
+  when: ceph_container_registry != 'quay.io'
+
+- name: "Log in to container registry"
+  ansible.builtin.command: >
+    podman login {{ ceph_container_registry }}
+    --username {{ ceph_container_registry_user }}
+    --password {{ ceph_container_registry_password }}
+  when: ceph_container_registry_user | length > 0
+  no_log: true
+  changed_when: false
+
+# --- cephadm binary ---
+
+- name: "Derive ceph major version number"
+  ansible.builtin.set_fact:
+    _ceph_major: "{{ ceph_version | regex_search('[0-9]+') }}"
+
+# On Debian, download.ceph.com/debian-* hosts packages by Debian codename.
+# On Ubuntu, those repos only carry Debian suites; use the signed Ceph PPA
+# or fall back to Ubuntu universe which carries cephadm out of the box.
+- name: "Create apt keyrings directory"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  when: ansible_facts['distribution'] == 'Debian'
+
+- name: "Download Ceph apt repository GPG key"
+  ansible.builtin.get_url:
+    url: https://download.ceph.com/keys/release.asc
+    dest: /etc/apt/keyrings/ceph-release.asc
+    mode: "0644"
+    owner: root
+    group: root
+  when: ansible_facts['distribution'] == 'Debian'
+
+- name: "Add Ceph apt repository (Debian only)"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/ceph-release.asc]
+      https://download.ceph.com/debian-{{ _ceph_release_name[_ceph_major] | default('squid') }}/
+      {{ ansible_facts['distribution_release'] }} main
+    state: present
+    update_cache: true
+  vars:
+    _ceph_release_name:
+      "20": tentacle
+      "19": squid
+      "18": reef
+      "17": quincy
+      "16": pacific
+  when: ansible_facts['distribution'] == 'Debian'
+
+- name: "Install cephadm and ceph-common"
+  ansible.builtin.apt:
+    name:
+      - cephadm
+      - ceph-common
+    state: present
+
+# --- System user ---
+
+- name: "See if cephadm user already exists"
+  ansible.builtin.user:
+    name: "{{ ceph_cephadm_user }}"
+    state: present
+  register: cephadm_user_info
+  check_mode: true
+  failed_when: false
+
+- name: "Determine cephadm user home dir"
+  ansible.builtin.set_fact:
+    ceph_cephadm_home: "{{ cephadm_user_info.home | default('/home/cephadm') }}"
+
+- name: "Create cephadm system user"
+  ansible.builtin.user:
+    name: "{{ ceph_cephadm_user }}"
+    system: true
+    create_home: true
+    home: "{{ ceph_cephadm_home }}"
+    shell: /bin/bash
+
+- name: "Create .ssh directory for cephadm user"
+  ansible.builtin.file:
+    path: "{{ ceph_cephadm_home }}/.ssh"
+    state: directory
+    owner: "{{ ceph_cephadm_user }}"
+    mode: "0700"
+
+# --- SSH keypair: find existing key source or generate on bootstrap ---
+
+- name: "Check all MON nodes for existing cephadm SSH private key"
+  ansible.builtin.stat:
+    path: "{{ ceph_cephadm_home }}/.ssh/id_ed25519"
+  delegate_to: "{{ item }}"
+  register: _mon_ssh_key_stat
+  loop: "{{ groups['ceph_' + ceph_cluster_name + '_mon'] | unique | sort }}"
+  run_once: true
+
+- name: "Determine SSH key source node"
+  ansible.builtin.set_fact:
+    _cephadm_key_source: >-
+      {%- set holders = _mon_ssh_key_stat.results
+          | selectattr('stat.exists', 'defined')
+          | selectattr('stat.exists')
+          | map(attribute='item') | list -%}
+      {{ holders | sort | first if holders | length > 0 else ceph_bootstrap_node }}
+  run_once: true
+
+- name: "Generate SSH keypair on key source node if absent"
+  ansible.builtin.command:
+    cmd: >
+      ssh-keygen -t ed25519 -N ""
+      -f {{ ceph_cephadm_home }}/.ssh/id_ed25519
+    creates: "{{ ceph_cephadm_home }}/.ssh/id_ed25519"
+  delegate_to: "{{ _cephadm_key_source }}"
+  run_once: true
+
+- name: "Set keypair ownership on key source node"
+  ansible.builtin.file:
+    path: "{{ ceph_cephadm_home }}/.ssh/{{ item }}"
+    owner: "{{ ceph_cephadm_user }}"
+  loop:
+    - id_ed25519
+    - id_ed25519.pub
+  delegate_to: "{{ _cephadm_key_source }}"
+  run_once: true
+
+# --- Distribute private key to all MON nodes ---
+
+- name: "Read SSH private key from key source (base64)"
+  ansible.builtin.command: base64 {{ ceph_cephadm_home }}/.ssh/id_ed25519
+  register: _cephadm_privkey_b64
+  delegate_to: "{{ _cephadm_key_source }}"
+  run_once: true
+  changed_when: false
+  no_log: true
+
+- name: "Read SSH public key from key source"
+  ansible.builtin.command: >
+    cat {{ ceph_cephadm_home }}/.ssh/id_ed25519.pub
+  register: _cephadm_pubkey
+  delegate_to: "{{ _cephadm_key_source }}"
+  run_once: true
+  changed_when: false
+
+# The Read tasks above use `run_once: true`, which records the registered
+# vars on whichever host the task ran on -- the *first host in the play*,
+# not the first MON in the inventory. When the play is a strict subset
+# (e.g. only node2), the inventory's first MON (node1) isn't in the play
+# and the cross-host hostvars lookup fails. Use `ansible_play_hosts_all
+# | first` so we look on the same host run_once chose.
+- name: "Broadcast SSH key facts to all hosts"
+  ansible.builtin.set_fact:
+    _cephadm_privkey_b64_data: "{{ hostvars[ansible_play_hosts_all | first]['_cephadm_privkey_b64'].stdout }}"
+    _cephadm_pubkey_data: "{{ hostvars[ansible_play_hosts_all | first]['_cephadm_pubkey'].stdout }}"
+
+- name: "Check if this MON node already has the private key"
+  ansible.builtin.stat:
+    path: "{{ ceph_cephadm_home }}/.ssh/id_ed25519"
+  register: _local_privkey_stat
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+
+- name: "Distribute SSH private key to MON nodes that lack it"
+  ansible.builtin.copy:
+    content: "{{ _cephadm_privkey_b64_data | b64decode }}"
+    dest: "{{ ceph_cephadm_home }}/.ssh/id_ed25519"
+    owner: "{{ ceph_cephadm_user }}"
+    mode: "0600"
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+    - not _local_privkey_stat.stat.exists | default(false)
+    - inventory_hostname != _cephadm_key_source
+  no_log: true
+
+- name: "Distribute public key as authorized_keys to all cluster nodes"
+  ansible.posix.authorized_key:
+    user: "{{ ceph_cephadm_user }}"
+    key: "{{ _cephadm_pubkey_data }}"
+    state: present
+
+# --- Passwordless sudo ---
+
+- name: "Install passwordless sudo for cephadm user"
+  ansible.builtin.template:
+    src: cephadm-sudoers.j2
+    dest: /etc/sudoers.d/cephadm
+    mode: "0440"
+    owner: root
+    group: root
+    validate: "visudo -c -f %s"
+
+# --- Pre-pull container image ---
+
+# `cephadm pull` always logs "Pulling container image..." to stderr, even
+# when the image is already cached locally, so we can't use stderr to
+# decide whether the run was a no-op. Probe with `podman image exists`
+# first and skip the pull when it's already present.
+- name: "Check if ceph container image is already present"
+  ansible.builtin.command: >
+    podman image exists {{ ceph_container_image }}:v{{ ceph_version }}
+  register: _ceph_image_present
+  changed_when: false
+  failed_when: false
+
+- name: "Pre-pull ceph container image on all nodes"
+  ansible.builtin.command: >
+    cephadm --image {{ ceph_container_image }}:v{{ ceph_version }} pull
+  when: _ceph_image_present.rc != 0
+  changed_when: true

@@ -13,3 +13,4 @@
 
 - name: "Create fs {{ fs_name }}"
   ansible.builtin.command: "ceph fs new {{ fs_name }} {{ fs_name }}_metadata {{ fs_name }}_data"
+  changed_when: true
