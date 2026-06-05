@@ -19,10 +19,5 @@
     - {key: "mgr/prometheus/rbd_stats_pools", value: "*"}
   changed_when: false
 
-- name: "UFW: Allow prometheus port on mon nodes"
-  community.general.ufw:
-    rule: allow
-    port: "9283"
-    proto: tcp
-    dest: "{{ ceph_mon_ip }}"
-  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+# Prometheus port 9283 UFW rule moved to cephadm-firewall.yml so it
+# lands on each mgr/mon host rather than only on the bootstrap node.

@@ -133,8 +133,5 @@
 - name: "Flush handlers (commit period if needed)"
   ansible.builtin.meta: flush_handlers
 
-- name: "UFW: Allow RGW traffic"
-  community.general.ufw:
-    rule: allow
-    port: "{{ ceph_rgw['port'] | default(7480) }}"
-    proto: tcp
+# RGW UFW rule moved to cephadm-firewall.yml so it lands on the actual
+# RGW hosts, not just the bootstrap node.

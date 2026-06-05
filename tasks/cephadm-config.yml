@@ -1,4 +1,18 @@
 ---
+# Pin the cluster-wide image cephadm uses for newly-created daemons.
+# Without this, cephadm falls back to the DEFAULT_IMAGE compiled into the
+# installed `cephadm` binary (often a much older release than ceph_version),
+# so a new host whose OSDs get scheduled by the label-based osd spec ends
+# up running the wrong major version until cephadm-normalize-images
+# eventually heals it. Setting the full `:vX.Y.Z` tag here, on every
+# play, makes the initial deploy land on the right image. The
+# normalize-images pass later in main.yml is still the safety net.
+- name: "Pin cluster container image (including version tag)"
+  ansible.builtin.command: >
+    ceph config set mgr mgr/cephadm/container_image_base
+    {{ ceph_container_image }}:v{{ ceph_version }}
+  changed_when: false
+
 - name: "Apply global ceph cluster config"
   ansible.builtin.command: >
     ceph config set {{ item.who }} {{ item.key }} {{ item.value }}
