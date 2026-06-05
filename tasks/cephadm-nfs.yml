@@ -50,8 +50,5 @@
     loop_var: _nfs_fs
   when: _nfs_fs.nfs | default(false)
 
-- name: "UFW: Allow NFSv4 traffic"
-  community.general.ufw:
-    rule: allow
-    port: "2049"
-    proto: tcp
+# NFS port 2049 UFW rule moved to cephadm-firewall.yml so it lands on
+# the actual NFS host (MDS-labeled), not just the bootstrap node.

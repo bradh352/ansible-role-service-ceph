@@ -251,6 +251,18 @@
   ansible.builtin.import_tasks: cephadm-prereqs.yml
 
 # -----------------------------------------------------------------------
+# Phase 1b: Firewall (all nodes)
+#
+# Open UFW ports BEFORE any daemons are bootstrapped, adopted, or
+# deployed by the orchestrator. New daemons coming up against a closed
+# firewall cause peering failures, mon election problems, and stuck
+# orchestrator deploys.
+# -----------------------------------------------------------------------
+
+- name: "Apply UFW firewall rules for ceph daemons"
+  ansible.builtin.import_tasks: cephadm-firewall.yml
+
+# -----------------------------------------------------------------------
 # Phase 2: Version check / upgrade (bootstrap node)
 # -----------------------------------------------------------------------
 
@@ -281,31 +293,71 @@
     - inventory_hostname == ceph_bootstrap_node
 
 # -----------------------------------------------------------------------
-# Admin keyring distribution (fresh path: after bootstrap)
+# Client config + admin keyring distribution (all cluster hosts)
+#
+# Legacy non-cephadm runs installed /etc/ceph/ceph.conf and the admin
+# keyring on every cluster host so the `ceph` CLI worked everywhere.
+# The cephadm rewrite only seeded them on MON nodes during fresh
+# installs, leaving OSD-/MDS-/RGW-only nodes (and any host added after
+# the initial deploy) with no usable client config.
+#
+# Generate a minimal conf via `ceph config generate-minimal-conf` on
+# the bootstrap node and broadcast it, along with the admin keyring,
+# to every cluster host that doesn't already have them. Files are only
+# written when absent so we don't clobber legacy conf files that may
+# still be in use mid-migration; new hosts pick up the cephadm-managed
+# minimal conf.
 # -----------------------------------------------------------------------
 
-- name: "Fetch the client admin keyring from bootstrap node"
-  ansible.builtin.command: base64 /etc/ceph/ceph.client.admin.keyring
-  register: admin_keyring_data
+- name: "Generate minimal ceph.conf on bootstrap node"
+  ansible.builtin.command: ceph config generate-minimal-conf
+  register: _minimal_conf
   changed_when: false
-  when:
-    - ceph_deployment_mode == 'fresh'
-    - not ceph_bootstrap
-    - not admin_keyring.stat.exists
+  run_once: true
   delegate_to: "{{ ceph_bootstrap_node }}"
 
-- name: "Install the client admin keyring on other MON nodes"
+- name: "Read admin keyring from bootstrap node"
+  ansible.builtin.command: base64 /etc/ceph/ceph.client.admin.keyring
+  register: _admin_keyring_b64
+  changed_when: false
+  no_log: true
+  run_once: true
+  delegate_to: "{{ ceph_bootstrap_node }}"
+
+# `run_once: true` records facts on the first host *in the play*, not on
+# `ceph_bootstrap_node` (which may not be in a subset play). Mirror the
+# pattern used in cephadm-prereqs.yml: broadcast via ansible_play_hosts_all.
+- name: "Broadcast bootstrap-node client files to all hosts"
+  ansible.builtin.set_fact:
+    _ceph_minimal_conf_data: "{{ hostvars[ansible_play_hosts_all | first]['_minimal_conf'].stdout }}"
+    _ceph_admin_keyring_data: "{{ hostvars[ansible_play_hosts_all | first]['_admin_keyring_b64'].stdout }}"
+  no_log: true
+
+- name: "Re-stat ceph.conf and admin keyring after bootstrap"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _ceph_client_files
+  loop:
+    - /etc/ceph/ceph.conf
+    - /etc/ceph/ceph.client.admin.keyring
+
+- name: "Install /etc/ceph/ceph.conf on hosts that lack it"
+  ansible.builtin.copy:
+    dest: /etc/ceph/ceph.conf
+    content: "{{ _ceph_minimal_conf_data }}\n"
+    mode: "0644"
+    owner: root
+    group: root
+  when: not _ceph_client_files.results[0].stat.exists
+
+- name: "Install the client admin keyring on hosts that lack it"
   ansible.builtin.copy:
     dest: /etc/ceph/ceph.client.admin.keyring
-    content: "{{ admin_keyring_data.stdout | b64decode }}"
+    content: "{{ _ceph_admin_keyring_data | b64decode }}"
     mode: "0640"
     owner: root
     group: root
-  when:
-    - ceph_deployment_mode == 'fresh'
-    - not ceph_bootstrap
-    - not admin_keyring.stat.exists
-    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+  when: not _ceph_client_files.results[1].stat.exists
 
 # -----------------------------------------------------------------------
 # Global cluster config (bootstrap node, all paths)

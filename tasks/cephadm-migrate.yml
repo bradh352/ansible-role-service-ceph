@@ -252,17 +252,10 @@
     (_orch_status.stdout | trim | default('{}') | from_yaml).backend | default('') != 'cephadm'
   changed_when: true
 
-# Pin the cluster-wide image base so any daemon cephadm creates later
-# (rgw via `orch apply rgw`, nfs via `ceph nfs cluster create`, mds via
-# spec apply) uses the configured image, not cephadm's hard-coded
-# DEFAULT_IMAGE or whatever a containerized legacy daemon happened to
-# be running.
-- name: "Migration: pin cluster container image base"
-  ansible.builtin.command: >
-    ceph config set mgr mgr/cephadm/container_image_base {{ ceph_container_image }}
-  run_once: true
-  delegate_to: "{{ ceph_bootstrap_node }}"
-  changed_when: true
+# Cluster-wide container image is pinned by cephadm-config.yml, which
+# runs on every play (including this migration path). Keeping the pin
+# there rather than duplicating it here ensures fresh installs and
+# steady-state runs get the same setting.
 
 - name: "Migration: configure cephadm SSH user"
   ansible.builtin.command: >

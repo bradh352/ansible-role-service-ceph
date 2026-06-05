@@ -1,0 +1,75 @@
+---
+# UFW rules for all cephadm-deployed daemons. Runs unconditionally on
+# every cluster host; each rule is gated on the host's inventory group
+# membership so the rule lands on the same host that actually runs the
+# daemon. This restores the per-daemon firewall coverage the legacy
+# (pre-cephadm) role had on every node and that the cephadm rewrite
+# accidentally consolidated onto the bootstrap node.
+
+- name: "UFW: Allow ceph monitor traffic v1 (6789)"
+  community.general.ufw:
+    rule: allow
+    port: "6789"
+    proto: tcp
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+
+- name: "UFW: Allow ceph monitor traffic v2 (3300)"
+  community.general.ufw:
+    rule: allow
+    port: "3300"
+    proto: tcp
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+
+- name: "UFW: Allow ceph mgr traffic (6800:7300)"
+  community.general.ufw:
+    rule: allow
+    port: "6800:7300"
+    proto: tcp
+    dest: "{{ ceph_mon_ip }}"
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+    - ceph_mon_ip is defined
+
+- name: "UFW: Allow ceph osd traffic (6800:7568)"
+  community.general.ufw:
+    rule: allow
+    port: "6800:7568"
+    proto: tcp
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_osd']
+
+- name: "UFW: Allow ceph mds traffic (6800:7568)"
+  community.general.ufw:
+    rule: allow
+    port: "6800:7568"
+    proto: tcp
+  when: inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+
+- name: "UFW: Allow NFSv4 traffic (2049)"
+  community.general.ufw:
+    rule: allow
+    port: "2049"
+    proto: tcp
+  when:
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mds']
+    - ceph_nfs_exports | length > 0
+
+- name: "UFW: Allow RGW traffic"
+  community.general.ufw:
+    rule: allow
+    port: "{{ ceph_rgw['port'] | default(7480) }}"
+    proto: tcp
+  when:
+    - groups['ceph_' + ceph_cluster_name + '_rgw'] is defined
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_rgw']
+    - ceph_rgw is defined
+
+- name: "UFW: Allow prometheus mgr exporter (9283)"
+  community.general.ufw:
+    rule: allow
+    port: "9283"
+    proto: tcp
+    dest: "{{ ceph_mon_ip }}"
+  when:
+    - ceph_prometheus
+    - inventory_hostname in groups['ceph_' + ceph_cluster_name + '_mon']
+    - ceph_mon_ip is defined
