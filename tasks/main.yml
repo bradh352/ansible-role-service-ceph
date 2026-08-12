@@ -467,6 +467,22 @@
   ansible.builtin.import_tasks: cephadm-nice.yml
 
 # -----------------------------------------------------------------------
+# CPU isolation (all nodes, opt-in) -- hard-partition CPUs so VM vCPU
+# threads cannot starve colocated Ceph daemons during reclaim storms.
+# -----------------------------------------------------------------------
+
+- name: "Isolate Ceph daemons onto reserved CPUs (cgroup v2 AllowedCPUs)"
+  ansible.builtin.import_tasks: cephadm-cpuset.yml
+
+# -----------------------------------------------------------------------
+# VM memory cap (all nodes, opt-in) -- reserve host+Ceph RAM so VM memory
+# exhaustion cannot hang the host; turns an outage into one VM restart.
+# -----------------------------------------------------------------------
+
+- name: "Cap machine.slice memory to protect the host + Ceph (cgroup v2)"
+  ansible.builtin.import_tasks: cephadm-mem-guard.yml
+
+# -----------------------------------------------------------------------
 # Prometheus (bootstrap node, optional)
 # -----------------------------------------------------------------------
 

@@ -1,0 +1,93 @@
+---
+# machine.slice VM memory cap for hyperconverged hosts. When the host runs
+# memory-overcommitted with no admission control, nothing caps what the VMs
+# collectively consume, so a demand spike drives the *host* kernel into global
+# reclaim and a multi-CPU soft-lockup hang -- a gray failure (host alive but
+# unresponsive) that VM-level HA cannot detect, taking Ceph storage down for
+# everyone.
+#
+# Reserving host+Ceph memory with a cgroup v2 cap on machine.slice contains the
+# pressure to the VM cgroup: reclaim of guest free-pages first, then at worst a
+# single VM OOM that HA restarts -- instead of hanging the host. It converts a
+# whole-host outage into one VM restart. It is a backstop, NOT a scheduler
+# input: set it well above normal usage so it only bites near exhaustion.
+#
+# Sizing: derive from the measured *unreclaimable* non-VM floor (daemon anon +
+# kernel slab), NOT system.slice memory.current -- most of which is reclaimable
+# page cache. Reserve = that hard floor + Ceph recovery/backfill headroom + a
+# free buffer; page cache is elastic and left to shrink under the cap's own
+# memcg reclaim. Nodes running extra colocated services need a larger reserve,
+# so set these per host/group rather than globally.
+#
+# Applied via `systemctl set-property` (live cgroup + persisted to
+# /etc/systemd/system.control), so no reboot / no VM restart, and new VM scopes
+# inherit it. GUARDED twice: skip if machine.slice has no cgroup yet (no VMs on
+# this node), and refuse to apply when the slice is already near the cap, since
+# lowering MemoryMax below current usage would immediately OOM-kill VMs.
+#
+# Disabled by default: the values are host-specific. See defaults/main.yml.
+
+- name: "VM memory guard | Validate the cap is configured"
+  ansible.builtin.assert:
+    that:
+      - ceph_vm_memory_high | default('') | length > 0
+      - ceph_vm_memory_max | default('') | length > 0
+    fail_msg: >-
+      ceph_vm_memory_guard is enabled but ceph_vm_memory_high and/or
+      ceph_vm_memory_max are unset. Both must be set to systemd-style sizes
+      (e.g. "945G") sized for this host (see defaults/main.yml).
+  when: ceph_vm_memory_guard | bool
+
+- name: "VM memory guard | Does machine.slice have a live cgroup?"
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/machine.slice/memory.current
+  register: _msl_stat
+  when: ceph_vm_memory_guard | bool
+
+- name: "VM memory guard | Read machine.slice current usage (from the target host)"
+  ansible.builtin.slurp:
+    src: /sys/fs/cgroup/machine.slice/memory.current
+  register: _msl_current
+  when:
+    - ceph_vm_memory_guard | bool
+    - _msl_stat.stat.exists | default(false)
+
+- name: "VM memory guard | Compute usage vs the proposed hard cap"
+  ansible.builtin.set_fact:
+    _msl_current_bytes: "{{ _msl_current.content | b64decode | trim | int }}"
+    _msl_max_bytes: "{{ ceph_vm_memory_max | human_to_bytes }}"
+  when:
+    - ceph_vm_memory_guard | bool
+    - _msl_stat.stat.exists | default(false)
+
+- name: "VM memory guard | Skip (with warning) if usage is within 10% of the cap"
+  ansible.builtin.debug:
+    msg: >-
+      SKIPPING machine.slice memory cap on {{ inventory_hostname }}:
+      current usage {{ (_msl_current_bytes | int / 1073741824) | round(1) }} GiB is within 10% of
+      MemoryMax {{ ceph_vm_memory_max }} -- applying now would risk an immediate VM OOM.
+      Migrate VMs off this host (or raise the cap) before enabling.
+  when:
+    - ceph_vm_memory_guard | bool
+    - _msl_stat.stat.exists | default(false)
+    - _msl_current_bytes | int > (_msl_max_bytes | int * 0.9)
+
+- name: "VM memory guard | Cap machine.slice memory (reserve host+Ceph RAM)"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    want_h="{{ ceph_vm_memory_high | human_to_bytes }}"
+    want_m="{{ ceph_vm_memory_max | human_to_bytes }}"
+    cur_h=$(systemctl show machine.slice -p MemoryHigh --value)
+    cur_m=$(systemctl show machine.slice -p MemoryMax --value)
+    if [ "$cur_h" != "$want_h" ] || [ "$cur_m" != "$want_m" ]; then
+      systemctl set-property machine.slice "MemoryHigh={{ ceph_vm_memory_high }}" "MemoryMax={{ ceph_vm_memory_max }}"
+      echo APPLIED
+    fi
+  args:
+    executable: /bin/bash
+  register: _msl_apply
+  changed_when: "'APPLIED' in _msl_apply.stdout"
+  when:
+    - ceph_vm_memory_guard | bool
+    - _msl_stat.stat.exists | default(false)
+    - _msl_current_bytes | int <= (_msl_max_bytes | int * 0.9)

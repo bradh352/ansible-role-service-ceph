@@ -1,0 +1,83 @@
+---
+# Hard CPU isolation for Ceph daemons on hyperconverged hosts (Ceph colocated
+# with VMs). VM vCPU threads (machine.slice) that spin in non-preemptible
+# memory reclaim starve OSD threads sharing the same CPU, causing storage
+# pauses and client-side health-check timeouts. cgroup v2 AllowedCPUs
+# partitions the host so Ceph runs on cores no VM can touch. Nice=
+# (cephadm-nice.yml) is a soft priority that cannot help against a spinning
+# non-preemptible CPU -- this is the hard complement.
+#
+# Applied with `systemctl set-property`, which changes the live cgroup AND
+# persists to /etc/systemd/system.control, so there is no reboot and no VM
+# restart; new VM scopes inherit machine.slice's restricted set automatically.
+# The cephadm slice name carries a systemd-escaped fsid
+# (system-ceph\x2d<fsid>...), so we discover it at runtime and resolve its
+# cgroup path via systemd rather than constructing the escaped path ourselves.
+#
+# Disabled by default: ceph_reserved_cpus/ceph_vm_cpus are host-specific and
+# MUST be exact complements over the host's full CPU list. See defaults/main.yml.
+
+- name: "CPU isolation | Validate the CPU ranges are configured"
+  ansible.builtin.assert:
+    that:
+      - ceph_reserved_cpus | default('') | length > 0
+      - ceph_vm_cpus | default('') | length > 0
+    fail_msg: >-
+      ceph_cpu_isolation is enabled but ceph_reserved_cpus and/or ceph_vm_cpus
+      are unset. Both must be set to complementary CPU ranges covering the
+      host's full CPU list (see defaults/main.yml).
+  when: ceph_cpu_isolation | bool
+
+- name: "CPU isolation | Discover the cephadm systemd slice"
+  ansible.builtin.shell: >
+    set -o pipefail;
+    systemctl list-units --all --plain --no-legend '*ceph*.slice'
+    | awk 'NR==1 {print $1}'
+  args:
+    executable: /bin/bash
+  register: _ceph_slice
+  changed_when: false
+  check_mode: false
+  when: ceph_cpu_isolation | bool
+
+- name: "CPU isolation | Partition CPUs between the Ceph slice and the VM slice"
+  when:
+    - ceph_cpu_isolation | bool
+    - _ceph_slice.stdout | default('') | trim | length > 0
+  block:
+    - name: "CPU isolation | Pin the Ceph slice to the reserved cores"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        slice="{{ _ceph_slice.stdout | trim }}"
+        want="{{ ceph_reserved_cpus }}"
+        cg=$(systemctl show -p ControlGroup --value "$slice")
+        cur=$(cat "/sys/fs/cgroup${cg}/cpuset.cpus" 2>/dev/null || true)
+        if [ "$cur" != "$want" ]; then
+          systemctl set-property "$slice" "AllowedCPUs=${want}"
+          echo APPLIED
+        fi
+      args:
+        executable: /bin/bash
+      register: _ceph_cpuset
+      changed_when: "'APPLIED' in _ceph_cpuset.stdout"
+
+    - name: "CPU isolation | Keep VMs (machine.slice) off the reserved cores"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        want="{{ ceph_vm_cpus }}"
+        cur=$(cat /sys/fs/cgroup/machine.slice/cpuset.cpus 2>/dev/null || true)
+        if [ "$cur" != "$want" ]; then
+          systemctl set-property machine.slice "AllowedCPUs=${want}"
+          echo APPLIED
+        fi
+      args:
+        executable: /bin/bash
+      register: _machine_cpuset
+      changed_when: "'APPLIED' in _machine_cpuset.stdout"
+
+- name: "CPU isolation | Note when no ceph slice is present (skipped)"
+  ansible.builtin.debug:
+    msg: "No ceph systemd slice on {{ inventory_hostname }}; CPU isolation skipped."
+  when:
+    - ceph_cpu_isolation | bool
+    - _ceph_slice.stdout | default('') | trim | length == 0

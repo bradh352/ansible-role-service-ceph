@@ -17,6 +17,44 @@ ceph_osd_rotational: ~
 # template implicitly relied on.
 ceph_osd_memory_target_autotune: false
 ceph_osd_memory_target: 4294967296
+
+# CPU isolation for the Ceph slice (see cephadm-cpuset.yml). On hyperconverged
+# hosts, VM vCPU threads that spin in non-preemptible memory reclaim starve
+# colocated OSD threads and cause storage pauses. Hard-partition the host with
+# cgroup v2 AllowedCPUs so Ceph daemons get cores that no VM (machine.slice)
+# can touch.
+#
+# Off by default: the ranges are host-specific and MUST be exact complements
+# over the host's full CPU list -- anything else either leaves cores unused or
+# lets VMs back onto Ceph's cores. Set both per host/group, keeping SMT
+# siblings together (on many EPYC parts sibling of core N is N + nproc/2).
+# Example, reserving 12 physical cores on a 192-thread host:
+#   ceph_cpu_isolation: true
+#   ceph_reserved_cpus: "0-11,96-107"
+#   ceph_vm_cpus: "12-95,108-191"
+ceph_cpu_isolation: false
+ceph_reserved_cpus: ""
+ceph_vm_cpus: ""
+
+# machine.slice VM memory cap (see cephadm-mem-guard.yml). Reserves host+Ceph
+# RAM so VM memory exhaustion cannot drive the host into global reclaim /
+# soft-lockups -- turning a whole-host outage into at most a single VM restart.
+# A backstop, not a scheduler input.
+#
+# Off by default: sizes are host-specific. Size from the measured
+# *unreclaimable* non-VM floor (daemon anon + kernel slab), NOT
+# system.slice memory.current -- most of which is reclaimable page cache.
+# Reserve = hard floor + Ceph recovery/backfill headroom + a free buffer.
+# Nodes with extra colocated services need a larger reserve, so set these
+# per host/group. Values are systemd sizes (1024-based).
+# Example, reserving 128 GiB on a 1133 GiB host:
+#   ceph_vm_memory_guard: true
+#   ceph_vm_memory_high: "945G"
+#   ceph_vm_memory_max: "1005G"
+ceph_vm_memory_guard: false
+ceph_vm_memory_high: ""
+ceph_vm_memory_max: ""
+
 ceph_container_registry: "quay.io"
 ceph_container_registry_user: ""
 ceph_container_registry_password: ""
