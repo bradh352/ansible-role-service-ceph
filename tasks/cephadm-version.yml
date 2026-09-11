@@ -1,53 +1,286 @@
 ---
+# Version reconciliation and upgrade orchestration.
+#
+# Included from main.yml with `run_once: true`; every task delegates to
+# `ceph_bootstrap_node` so the phase still runs when the play is a subset
+# that does not include the bootstrap host. Gating on
+# `inventory_hostname == ceph_bootstrap_node` meant a `--limit` run
+# silently skipped the upgrade and then let cephadm-normalize-images.yml
+# redeploy every out-of-date daemon by hand -- which bypasses the
+# orchestrator's ordering and its `ok-to-stop` checks.
+#
+# The rolling upgrade itself is performed entirely by the cephadm mgr
+# module: it enforces the daemon ordering (mgr -> mon -> crash -> osd ->
+# mds -> rgw -> ... -> monitoring stack), calls `ok-to-stop` before each
+# mon/osd/mds restart, and sets `require-osd-release` once the OSDs are
+# done. Nothing in this role restarts daemons during an upgrade. The
+# role's job is to refuse to start one against an unhealthy cluster and
+# to block the rest of the play until the orchestrator is idle again --
+# under the linear strategy the `until` loop below is a play-wide
+# barrier, so every other host parks here for the duration.
+#
+# See UPGRADING.md for driving the same sequence by hand.
 
-- name: "Get currently deployed ceph version"
-  ansible.builtin.command: ceph version --format json
-  register: _ceph_ver_raw
-  changed_when: false
+- name: "Check whether the cluster is bootstrapped yet"
+  ansible.builtin.stat:
+    path: /etc/ceph/ceph.client.admin.keyring
+  register: _upgrade_cluster_present
+  delegate_to: "{{ ceph_bootstrap_node }}"
 
-- name: "Parse major.minor.rel from version string"
-  ansible.builtin.set_fact:
-    _ceph_deployed_ver: >-
-      {{ _ceph_ver_raw.stdout | from_json | json_query('version')
-         | regex_search('[0-9]+\.[0-9]+\.[0-9]+') }}
+- name: "Version reconciliation"
+  when: _upgrade_cluster_present.stat.exists
+  delegate_to: "{{ ceph_bootstrap_node }}"
+  block:
 
-# --- Legacy mode: assert deployed version matches ceph_version ---
+    # -------------------------------------------------------------------
+    # Deployed versions
+    #
+    # `ceph version` (singular) reports only the version of the mon that
+    # answered the command, and cephadm upgrades mgr+mon FIRST. An
+    # upgrade interrupted after the mons flipped therefore looks complete
+    # to a singular check, and the remaining osd/mds/rgw daemons would
+    # never be upgraded -- they would instead be picked up by
+    # cephadm-normalize-images.yml and redeployed all at once with no
+    # ok-to-stop check. `ceph versions` (plural) reports every daemon,
+    # which is the only safe signal.
+    # -------------------------------------------------------------------
 
-- name: "Legacy: assert deployed version matches ceph_version (no upgrade during migration)"
-  ansible.builtin.assert:
-    that: _ceph_deployed_ver == ceph_version
-    fail_msg: >-
-      Deployed Ceph {{ _ceph_deployed_ver }} does not match ceph_version={{ ceph_version }}.
-      Set ceph_version to match your installed version before migrating.
-      After migration completes you may bump ceph_version to trigger an upgrade.
-  when: ceph_deployment_mode == 'legacy'
+    - name: "Get per-daemon ceph versions"
+      ansible.builtin.command: ceph versions
+      register: _ceph_versions_raw
+      changed_when: false
 
-# --- cephadm mode: upgrade if ceph_version changed ---
+    - name: "Parse the distinct versions running in the cluster"
+      ansible.builtin.set_fact:
+        _ceph_deployed_vers: >-
+          {{ ((_ceph_versions_raw.stdout | from_json).overall | default({}) | list)
+             | map('regex_search', '[0-9]+\.[0-9]+\.[0-9]+')
+             | select('string') | unique | sort }}
 
-- name: "Cephadm: check if upgrade is already in progress"
-  ansible.builtin.command: ceph orch upgrade status --format json
-  register: _upgrade_status_check
-  changed_when: false
-  failed_when: _upgrade_status_check.rc != 0 and _upgrade_status_check.rc !=2
-  when: ceph_deployment_mode == 'cephadm'
+    # --- Legacy mode: assert every daemon matches ceph_version ---
 
-- name: "Cephadm: start upgrade if version tag differs"
-  ansible.builtin.command: >
-    ceph orch upgrade start --image {{ ceph_container_image }}:v{{ ceph_version }}
-  when:
-    - ceph_deployment_mode == 'cephadm'
-    - _ceph_deployed_ver != ceph_version
-    - not (_upgrade_status_check.stdout | trim | default('{}') | from_json).in_progress | default(false)
-  register: _upgrade_started
-  changed_when: true
+    - name: "Legacy: assert deployed version matches ceph_version (no upgrade during migration)"
+      ansible.builtin.assert:
+        that: _ceph_deployed_vers == [ceph_version]
+        fail_msg: >-
+          Deployed Ceph daemons are running
+          {{ _ceph_deployed_vers | join(', ') | default('an unknown version', true) }},
+          which does not match ceph_version={{ ceph_version }} on every daemon.
+          Set ceph_version to match your installed version before migrating.
+          After migration completes you may bump ceph_version to trigger an upgrade.
+      when: ceph_deployment_mode == 'legacy'
 
-- name: "Cephadm: wait for upgrade to complete"
-  ansible.builtin.command: ceph orch upgrade status --format json
-  register: _upgrade_wait
-  until: not (_upgrade_wait.stdout | trim | from_json).in_progress | default(false)
-  retries: 120
-  delay: 30
-  changed_when: false
-  when:
-    - ceph_deployment_mode == 'cephadm'
-    - _upgrade_started is defined and _upgrade_started.changed | default(false)
+    # --- cephadm mode: upgrade if any daemon is off the target version ---
+
+    - name: "Cephadm: query orchestrator upgrade status"
+      ansible.builtin.command: ceph orch upgrade status --format json
+      register: _upgrade_status_check
+      changed_when: false
+      failed_when: _upgrade_status_check.rc not in [0, 2]
+      when: ceph_deployment_mode == 'cephadm'
+
+    # `| default('{}')` alone does NOT substitute for an empty string --
+    # only for an undefined value -- so an rc=2 status call with no stdout
+    # used to blow up `from_json`. The second argument makes `default`
+    # fire on any falsy value.
+    - name: "Cephadm: determine what this run has to do"
+      ansible.builtin.set_fact:
+        _ceph_upgrade_needed: "{{ _ceph_deployed_vers != [ceph_version] }}"
+        _ceph_upgrade_in_progress: >-
+          {{ (_upgrade_status_check.stdout | default('') | trim | default('{}', true)
+              | from_json).in_progress | default(false) | bool }}
+      when: ceph_deployment_mode == 'cephadm'
+
+    # -------------------------------------------------------------------
+    # Pre-flight -- only when this run would *start* an upgrade. An
+    # upgrade that is already running has already cleared these gates,
+    # and re-asserting them would fail the resume: cephadm deliberately
+    # sits at HEALTH_WARN with undersized/degraded PGs while it restarts
+    # OSDs.
+    # -------------------------------------------------------------------
+
+    - name: "Cephadm: pre-flight -- read cluster status"
+      ansible.builtin.command: ceph status --format json
+      register: _upgrade_pre_status
+      changed_when: false
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _ceph_upgrade_needed
+        - not _ceph_upgrade_in_progress
+
+    - name: "Cephadm: pre-flight -- read mgr standby count"
+      ansible.builtin.command: ceph mgr dump --format json
+      register: _upgrade_pre_mgr
+      changed_when: false
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _ceph_upgrade_needed
+        - not _ceph_upgrade_in_progress
+
+    # Upstream requires a stable cluster with no down/recovering/
+    # incomplete/undersized/backfilling PGs, and at least one standby mgr
+    # (without it the upgrade stops at UPGRADE_NO_STANDBY_MGR after
+    # failing over the active mgr).
+    - name: "Cephadm: pre-flight -- assert the cluster is fit to upgrade"
+      ansible.builtin.assert:
+        that:
+          - _st.health.status in ceph_upgrade_allowed_health
+          - _st.osdmap.num_osds == _st.osdmap.num_up_osds
+          - _st.osdmap.num_osds == _st.osdmap.num_in_osds
+          - _blocking_pgs | length == 0
+          - _standbys | length > 0
+        fail_msg: >-
+          Refusing to start a Ceph upgrade
+          ({{ _ceph_deployed_vers | join(', ') }} -> {{ ceph_version }}).
+          health={{ _st.health.status }} (allowed: {{ ceph_upgrade_allowed_health | join(', ') }});
+          OSDs up/in/total={{ _st.osdmap.num_up_osds }}/{{ _st.osdmap.num_in_osds }}/{{ _st.osdmap.num_osds }};
+          standby mgr daemons={{ _standbys | length }};
+          blocking PG states={{ _blocking_pgs | join(', ') | default('none', true) }}.
+          Let the cluster settle (`ceph -s`, `ceph health detail`) and re-run.
+      vars:
+        _st: "{{ _upgrade_pre_status.stdout | from_json }}"
+        _standbys: "{{ (_upgrade_pre_mgr.stdout | from_json).standbys | default([]) }}"
+        _blocking_pgs: >-
+          {{ _st.pgmap.pgs_by_state | default([]) | map(attribute='state_name')
+             | select('search', '(' ~ (ceph_upgrade_blocking_pg_states | join('|')) ~ ')')
+             | list }}
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _ceph_upgrade_needed
+        - not _ceph_upgrade_in_progress
+
+    # Validates that the target image exists and is pullable, and reports
+    # which daemons would be touched, before anything is restarted. This
+    # is what catches a mistyped tag or a registry outage at the point
+    # where it is still free to fix.
+    - name: "Cephadm: dry-run the upgrade against the target image"
+      ansible.builtin.command: >
+        ceph orch upgrade check --image {{ ceph_container_image }}:v{{ ceph_version }}
+      register: _upgrade_precheck
+      changed_when: false
+      # `upgrade check` reports an unusable image as an `error` key in its
+      # JSON payload rather than a non-zero exit status.
+      failed_when: >-
+        _upgrade_precheck.rc != 0 or
+        'error' in (_upgrade_precheck.stdout | default('') | trim
+                    | default('{}', true) | from_json)
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - ceph_upgrade_precheck | bool
+        - _ceph_upgrade_needed
+        - not _ceph_upgrade_in_progress
+
+    # PG splits/merges in the middle of an upgrade can stall daemon
+    # restarts for a long time on a large cluster. The role turns the
+    # autoscaler on for every pool it creates, so this is not hypothetical.
+    - name: "Cephadm: pause the PG autoscaler for the duration of the upgrade"
+      ansible.builtin.command: ceph osd pool set noautoscale
+      changed_when: true
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - ceph_upgrade_pause_autoscale | bool
+        - _ceph_upgrade_needed
+        - not _ceph_upgrade_in_progress
+
+    - name: "Cephadm: start the rolling upgrade"
+      ansible.builtin.command: >
+        ceph orch upgrade start --image {{ ceph_container_image }}:v{{ ceph_version }}
+      register: _upgrade_started
+      changed_when: true
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _ceph_upgrade_needed
+        - not _ceph_upgrade_in_progress
+
+    # An upgrade left running by an earlier (interrupted) play must be
+    # waited on too. Waiting only on an upgrade *this* run started let the
+    # play march on to the spec applies and to normalize-images while the
+    # orchestrator was still restarting daemons.
+    - name: "Cephadm: record whether this run is driving an upgrade"
+      ansible.builtin.set_fact:
+        _ceph_upgrade_active: >-
+          {{ _ceph_upgrade_in_progress or
+             (_upgrade_started is defined and _upgrade_started.changed | default(false)) }}
+      when: ceph_deployment_mode == 'cephadm'
+
+    # `until` also exits on `is_paused` so a stalled upgrade is reported in
+    # one poll interval instead of burning the entire timeout budget --
+    # `failed_when` would not break the retry loop.
+    - name: "Cephadm: wait for the orchestrator upgrade to complete"
+      ansible.builtin.command: ceph orch upgrade status --format json
+      register: _upgrade_wait
+      vars:
+        _st: >-
+          {{ _upgrade_wait.stdout | default('') | trim | default('{}', true) | from_json }}
+      until: >-
+        not (_st.in_progress | default(false) | bool) or
+        (_st.is_paused | default(false) | bool)
+      retries: >-
+        {{ ((ceph_upgrade_timeout_minutes | int * 60) /
+            (ceph_upgrade_poll_delay | int)) | round(0, 'ceil') | int }}
+      delay: "{{ ceph_upgrade_poll_delay | int }}"
+      changed_when: false
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _ceph_upgrade_active | default(false) | bool
+
+    # Fails before the autoscaler is resumed: a paused upgrade is still
+    # pending, so leave `noautoscale` held until it is finished or
+    # abandoned. Whoever resolves the pause owns clearing it.
+    - name: "Cephadm: fail fast if the upgrade stalled in a paused state"
+      ansible.builtin.fail:
+        msg: >-
+          `ceph orch upgrade` is paused:
+          {{ _st.message | default('(no message)') }} ({{ _st.progress | default('no progress reported') }}).
+          Diagnose with `ceph -W cephadm` and `ceph health detail`, then either
+          `ceph orch upgrade resume` or `ceph orch upgrade stop`. Do NOT re-run
+          this role expecting it to force the remaining daemons forward -- it
+          will not, by design.
+          {% if ceph_upgrade_pause_autoscale | bool %}
+          The global `noautoscale` flag is still set and will be cleared by the
+          next run that sees the upgrade through; clear it with
+          `ceph osd pool unset noautoscale` if you abandon the upgrade.
+          {% endif %}
+      vars:
+        _st: >-
+          {{ _upgrade_wait.stdout | default('') | trim | default('{}', true) | from_json }}
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _upgrade_wait is defined
+        - _st.is_paused | default(false) | bool
+
+    - name: "Cephadm: resume the PG autoscaler"
+      ansible.builtin.command: ceph osd pool unset noautoscale
+      changed_when: true
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - ceph_upgrade_pause_autoscale | bool
+        - _ceph_upgrade_active | default(false) | bool
+
+    # The orchestrator reporting "not in progress" is not proof that every
+    # daemon landed on the target: a stopped upgrade also reports idle.
+    - name: "Cephadm: re-read per-daemon versions after the upgrade"
+      ansible.builtin.command: ceph versions
+      register: _ceph_versions_post
+      changed_when: false
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _ceph_upgrade_active | default(false) | bool
+
+    - name: "Cephadm: assert every daemon is running the target version"
+      ansible.builtin.assert:
+        that: _post_vers == [ceph_version]
+        fail_msg: >-
+          The orchestrator reports no upgrade in progress, but the cluster is
+          running {{ _post_vers | join(', ') | default('no daemons', true) }}
+          rather than {{ ceph_version }} everywhere. Check
+          `ceph orch upgrade status`, `ceph versions` and `ceph orch ps`
+          before re-running.
+      vars:
+        _post_vers: >-
+          {{ ((_ceph_versions_post.stdout | from_json).overall | default({}) | list)
+             | map('regex_search', '[0-9]+\.[0-9]+\.[0-9]+')
+             | select('string') | unique | sort }}
+      when:
+        - ceph_deployment_mode == 'cephadm'
+        - _ceph_upgrade_active | default(false) | bool

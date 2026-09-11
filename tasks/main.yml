@@ -263,12 +263,26 @@
   ansible.builtin.import_tasks: cephadm-firewall.yml
 
 # -----------------------------------------------------------------------
-# Phase 2: Version check / upgrade (bootstrap node)
+# Phase 2: Version check / upgrade
+#
+# `run_once` rather than `inventory_hostname == ceph_bootstrap_node`: the
+# tasks inside all delegate to the bootstrap node, so the phase still runs
+# on a partial (`--limit`) play that excludes it. Gating on the bootstrap
+# host meant a limited run with a bumped `ceph_version` skipped the
+# orchestrated upgrade entirely and then let cephadm-normalize-images.yml
+# redeploy every out-of-date daemon by hand -- no ordering, no
+# `ok-to-stop`, every OSD queued at once.
+#
+# Under the linear strategy this is also the play-wide barrier: while the
+# orchestrator rolls the cluster, every other host sits parked on this
+# task and cannot advance to the per-host tasks below (spec applies,
+# systemd Nice= restarts, cpuset changes) that would otherwise run against
+# daemons mid-upgrade.
 # -----------------------------------------------------------------------
 
 - name: "Version check and upgrade orchestration"
-  ansible.builtin.import_tasks: cephadm-version.yml
-  when: inventory_hostname == ceph_bootstrap_node
+  ansible.builtin.include_tasks: cephadm-version.yml
+  run_once: true
 
 # -----------------------------------------------------------------------
 # Phase 3a: Legacy migration path

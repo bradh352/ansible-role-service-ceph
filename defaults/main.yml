@@ -6,6 +6,44 @@ ceph_prometheus: false
 ceph_version: "19.2.3"
 ceph_container_image: "quay.io/ceph/ceph"
 ceph_cephadm_user: "cephadm"
+
+# --- Upgrade orchestration (see cephadm-version.yml and UPGRADING.md) ---
+#
+# Bumping `ceph_version` on an existing cephadm cluster triggers
+# `ceph orch upgrade start`. The orchestrator does the rolling restart;
+# these knobs control how the role gates and waits on it.
+
+# Poll interval and overall ceiling for the upgrade wait. A major-version
+# upgrade restarts every daemon in the cluster one at a time, gated on
+# `ok-to-stop`, so wall-clock time scales with OSD count. The former
+# 60-minute ceiling was only ever enough for a lab. 6h / 30s = 720 polls.
+ceph_upgrade_timeout_minutes: 360
+ceph_upgrade_poll_delay: 30
+
+# Cluster health states under which the role will *start* an upgrade.
+# HEALTH_WARN is permitted by default because real clusters idle there for
+# benign reasons; the OSD and PG assertions are the substantive gate.
+ceph_upgrade_allowed_health: ["HEALTH_OK", "HEALTH_WARN"]
+
+# PG states that must be absent before an upgrade starts. Upstream: begin
+# only with "no down, recovering, incomplete, undersized or backfilling
+# PGs". Matched as substrings against each `pgmap.pgs_by_state` entry.
+ceph_upgrade_blocking_pg_states:
+  - down
+  - recovering
+  - incomplete
+  - undersized
+  - backfilling
+
+# Run `ceph orch upgrade check --image ...` first. Catches a mistyped tag
+# or an unreachable registry while it is still free to fix, instead of at
+# UPGRADE_FAILED_PULL with daemons already restarting.
+ceph_upgrade_precheck: true
+
+# Hold the global `noautoscale` flag for the duration of the upgrade so PG
+# splits/merges cannot stall daemon restarts, then clear it. The role
+# enables the autoscaler on every pool it creates, so this applies.
+ceph_upgrade_pause_autoscale: true
 ceph_osd_min_size: 1099511627776
 ceph_osd_rotational: ~
 

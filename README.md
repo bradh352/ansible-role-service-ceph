@@ -305,18 +305,25 @@ After migration is complete, upgrade by bumping `ceph_version` in your group
 vars and re-running the playbook:
 
 ```yaml
-ceph_version: "20.0.1"   # or the next release
+ceph_version: "20.2.3"   # or the next release
 ```
 
 ```bash
 ansible-playbook deploy.yml --tags ceph
 ```
 
-The role detects that the deployed version differs from `ceph_version`, runs
-`ceph orch upgrade start --image quay.io/ceph/ceph:v20.0.1`, and polls until the
-upgrade is complete before proceeding. The upgrade is a rolling restart — no
-downtime for RBD or RGW; CephFS and NFS experience brief per-MDS pauses during
-MDS restarts.
+The role detects that one or more daemons differ from `ceph_version`, asserts
+the cluster is fit to upgrade, runs
+`ceph orch upgrade start --image quay.io/ceph/ceph:v20.2.3`, and polls until the
+upgrade is complete before proceeding. The rolling restart is performed by the
+cephadm orchestrator, which sequences daemon types and checks `ok-to-stop`
+before each mon/OSD/MDS — no downtime for RBD or RGW; CephFS and NFS pause
+during the MDS phase.
+
+**See [`UPGRADING.md`](UPGRADING.md)** for the full procedure, the tunables that
+control the upgrade wait and pre-flight gates, how to drive the same sequence by
+hand (recommended for a major-version jump such as Squid → Tentacle), and the
+environment-specific gotchas to check first.
 
 ---
 
