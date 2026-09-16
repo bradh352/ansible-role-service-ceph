@@ -1,48 +1,23 @@
 ---
-# machine.slice VM memory cap for hyperconverged hosts. When the host runs
-# memory-overcommitted with no admission control, nothing caps what the VMs
-# collectively consume, so a demand spike drives the *host* kernel into global
-# reclaim and a multi-CPU soft-lockup hang -- a gray failure (host alive but
-# unresponsive) that VM-level HA cannot detect, taking Ceph storage down for
-# everyone.
+# machine.slice VM memory cap. The hyperconverged hosts run memory-overcommitted
+# with no admission control: nothing caps what the VMs collectively consume, so a
+# demand spike drives the *host* kernel into global reclaim and a multi-CPU
+# soft-lockup hang -- a gray failure (host alive but unresponsive) that CloudStack
+# HA can't catch, taking storage down for everyone.
 #
-# Reserving host+Ceph memory with a cgroup v2 HARD cap on machine.slice
-# (MemoryMax only, NO MemoryHigh throttle band) contains the pressure to the VM
-# cgroup: at worst a single VM OOM that HA restarts, instead of hanging the
-# host. It converts a whole-host outage into one VM restart. It is a backstop,
-# NOT a scheduler input: size it well above normal usage so it only bites near
-# exhaustion.
-#
-# Deliberately no MemoryHigh: the slice is ~all anonymous guest RAM with no
-# swap, i.e. UNRECLAIMABLE, so a MemoryHigh soft limit cannot reclaim its way
-# back down. It only throttles every VM in the slice (a per-allocation sleep
-# penalty) into a gray stall that hits the latency-sensitive guests -- and
-# never reaches MemoryMax to OOM. Observed in production: usage wedged between
-# High and Max for a long stall, `high` events firing, `max` and `oom_kill`
-# both 0. MemoryMax alone resolves the same pressure as a bounded OOM of the
-# highest-oom_score VM, which pairs with a per-VM oom_score_adj policy to make
-# that an expendable guest.
-#
-# Sizing: derive from the measured *unreclaimable* non-VM floor (daemon anon +
-# kernel slab), NOT system.slice memory.current -- most of which is reclaimable
-# page cache. Reserve = that hard floor + Ceph recovery/backfill headroom + a
-# free buffer; page cache is elastic and left to shrink under the cap's own
-# memcg reclaim. Nodes running extra colocated services need a larger reserve,
-# so set this per host/group rather than globally.
-#
-# The knob is the RESERVE, and the cap is derived from this host's own MemTotal
-# (MemoryMax = MemTotal - reserve), so one value means the same thing on every
-# host size. A hard-coded cap would not: it silently reserves a different
-# amount on each host, and wherever it lands above MemTotal systemd accepts it
-# without complaint and nothing is reserved at all.
+# Reserving host+Ceph memory with a cgroup v2 HARD cap (MemoryMax only, NO
+# MemoryHigh throttle) contains the pressure to the VM cgroup. The slice is
+# ~all anon guest RAM with no swap = unreclaimable, so a MemoryHigh throttle
+# can't reclaim -- it only stalls every VM (gray stall that hits k8s/etcd) and
+# never OOMs. MemoryMax + oom_score_adj instead resolves pressure as a bounded
+# OOM of an expendable VM (GARM), sparing prod k8s -- one VM restart, no stall.
+# Sized from incident troughs; a backstop, not a scheduler input.
 #
 # Applied via `systemctl set-property` (live cgroup + persisted to
 # /etc/systemd/system.control), so no reboot / no VM restart, and new VM scopes
 # inherit it. GUARDED twice: skip if machine.slice has no cgroup yet (no VMs on
 # this node), and refuse to apply when the slice is already near the cap, since
 # lowering MemoryMax below current usage would immediately OOM-kill VMs.
-#
-# Disabled by default: the values are host-specific. See defaults/main.yml.
 
 - name: "VM memory guard | Validate the reserve is configured"
   ansible.builtin.assert:
@@ -55,15 +30,19 @@
     quiet: true
   when: ceph_vm_memory_guard | bool
 
-# The reserve scales with what the node actually runs: a node running mon/mgr,
-# mds or rgw on top of its OSDs has a larger unreclaimable non-VM floor than an
-# OSD-only peer. Derive that from this cluster's own daemon-placement groups --
-# the same ones the rest of the role keys off -- so it needs no per-host
-# override and follows placement when that changes.
+# The reserve scales with what the node actually runs, which is a Ceph
+# question, not a tenant one: a node running mon/mgr, mds or rgw on top of its
+# OSDs has a larger unreclaimable non-VM floor than an OSD-only peer. Derive it
+# from this cluster's own daemon-placement groups -- the same ones the rest of
+# the role keys off -- so it needs no per-host override and follows placement
+# when that changes. The _mon lookup is deliberately NOT defaulted: every real
+# cluster has one, the rest of the role already requires it, and defaulting it
+# would turn a wrong ceph_cluster_name into a silently smaller reserve instead
+# of an error. An unset/empty _extra means "no extra", not a parse error.
 - name: "VM memory guard | Does this node run Ceph services beyond OSDs?"
   ansible.builtin.set_fact:
     _ceph_services_beyond_osd: "{{ inventory_hostname in (
-        (groups['ceph_' + ceph_cluster_name + '_mon'] | default([])) +
+        (groups['ceph_' + ceph_cluster_name + '_mon']) +
         (groups['ceph_' + ceph_cluster_name + '_mds'] | default([])) +
         (groups['ceph_' + ceph_cluster_name + '_rgw'] | default([])) ) }}"
   when: ceph_vm_memory_guard | bool
@@ -71,10 +50,15 @@
 - name: "VM memory guard | Resolve this host's reserve"
   ansible.builtin.set_fact:
     _ceph_host_reserve_bytes: "{{ (ceph_host_memory_reserve | human_to_bytes)
-      + (ceph_host_memory_reserve_extra | human_to_bytes if _ceph_services_beyond_osd | bool else 0) }}"
+      + (ceph_host_memory_reserve_extra | default('0', true) | human_to_bytes
+         if _ceph_services_beyond_osd | bool else 0) }}"
     _host_memtotal_bytes: "{{ ansible_facts['memtotal_mb'] | int * 1048576 }}"
   when: ceph_vm_memory_guard | bool
 
+# The knob is the RESERVE, so the cap has to be derived from this host's own
+# MemTotal rather than hard-coded. A hard-coded cap silently means a different
+# reserve on every host size -- and no reserve at all wherever it lands above
+# MemTotal, which systemd accepts without complaint.
 - name: "VM memory guard | Sanity-check the reserve against MemTotal"
   ansible.builtin.assert:
     that:
@@ -134,8 +118,8 @@
     want_m="{{ _msl_max_bytes | int }}"
     cur_h=$(systemctl show machine.slice -p MemoryHigh --value)
     cur_m=$(systemctl show machine.slice -p MemoryMax --value)
-    # MemoryHigh=infinity => no throttle band (it would only stall on
-    # unreclaimable anon); MemoryMax is the hard cap that OOMs one VM instead.
+    # MemoryHigh=infinity => no throttle band (would only stall unreclaimable
+    # anon); MemoryMax is the hard cap that OOM-kills an expendable VM instead.
     if [ "$cur_m" != "$want_m" ] || [ "$cur_h" != "infinity" ]; then
       systemctl set-property machine.slice MemoryHigh=infinity "MemoryMax=$want_m"
       echo APPLIED
