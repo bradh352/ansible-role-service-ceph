@@ -50,13 +50,28 @@
       - ceph_host_memory_reserve | default('') | length > 0
     fail_msg: >-
       ceph_vm_memory_guard is enabled but ceph_host_memory_reserve is unset. It
-      must be a systemd-style size (e.g. "128G") sized for this host (see
+      must be a systemd-style size (e.g. "128G") sized for these hosts (see
       defaults/main.yml).
+    quiet: true
   when: ceph_vm_memory_guard | bool
 
-- name: "VM memory guard | Derive the machine.slice cap (MemTotal - reserve)"
+# The reserve scales with what the node actually runs: a node running mon/mgr,
+# mds or rgw on top of its OSDs has a larger unreclaimable non-VM floor than an
+# OSD-only peer. Derive that from this cluster's own daemon-placement groups --
+# the same ones the rest of the role keys off -- so it needs no per-host
+# override and follows placement when that changes.
+- name: "VM memory guard | Does this node run Ceph services beyond OSDs?"
   ansible.builtin.set_fact:
-    _ceph_host_reserve_bytes: "{{ ceph_host_memory_reserve | human_to_bytes }}"
+    _ceph_services_beyond_osd: "{{ inventory_hostname in (
+        (groups['ceph_' + ceph_cluster_name + '_mon'] | default([])) +
+        (groups['ceph_' + ceph_cluster_name + '_mds'] | default([])) +
+        (groups['ceph_' + ceph_cluster_name + '_rgw'] | default([])) ) }}"
+  when: ceph_vm_memory_guard | bool
+
+- name: "VM memory guard | Resolve this host's reserve"
+  ansible.builtin.set_fact:
+    _ceph_host_reserve_bytes: "{{ (ceph_host_memory_reserve | human_to_bytes)
+      + (ceph_host_memory_reserve_extra | human_to_bytes if _ceph_services_beyond_osd | bool else 0) }}"
     _host_memtotal_bytes: "{{ ansible_facts['memtotal_mb'] | int * 1048576 }}"
   when: ceph_vm_memory_guard | bool
 
@@ -66,7 +81,7 @@
       - _ceph_host_reserve_bytes | int > 0
       - _ceph_host_reserve_bytes | int < (_host_memtotal_bytes | int / 2)
     fail_msg: >-
-      ceph_host_memory_reserve {{ (_ceph_host_reserve_bytes | int / 1073741824) | round(1) }} GiB
+      host+Ceph reserve {{ (_ceph_host_reserve_bytes | int / 1073741824) | round(1) }} GiB
       is not a sane fraction of MemTotal
       {{ (_host_memtotal_bytes | int / 1073741824) | round(1) }} GiB on
       {{ inventory_hostname }}. It must be positive and leave the VMs at least
@@ -74,7 +89,7 @@
     quiet: true
   when: ceph_vm_memory_guard | bool
 
-- name: "VM memory guard | Compute the hard cap"
+- name: "VM memory guard | Derive the machine.slice cap (MemTotal - reserve)"
   ansible.builtin.set_fact:
     _msl_max_bytes: "{{ (_host_memtotal_bytes | int) - (_ceph_host_reserve_bytes | int) }}"
   when: ceph_vm_memory_guard | bool
@@ -113,7 +128,7 @@
     - _msl_stat.stat.exists | default(false)
     - _msl_current_bytes | int > (_msl_max_bytes | int * 0.9)
 
-- name: "VM memory guard | Set hard MemoryMax, clear any MemoryHigh throttle band"
+- name: "VM memory guard | Set hard MemoryMax, clear MemoryHigh throttle band"
   ansible.builtin.shell: |
     set -euo pipefail
     want_m="{{ _msl_max_bytes | int }}"

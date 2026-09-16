@@ -96,8 +96,16 @@ ceph_vm_cpus: ""
 # Example:
 #   ceph_vm_memory_guard: true
 #   ceph_host_memory_reserve: "128G"
+#   ceph_host_memory_reserve_extra: "32G"
 ceph_vm_memory_guard: false
+# Base reserve: what an OSD-only node holds back for the host and Ceph.
 ceph_host_memory_reserve: ""
+# Additional reserve for nodes running Ceph services BEYOND OSDs (mon/mgr,
+# mds, rgw). Those daemons add to the unreclaimable non-VM floor, so such a
+# node needs a bigger reserve than an OSD-only peer. Added to the base above,
+# and applied automatically from this cluster's own mon/mds/rgw groups -- no
+# per-host override, and it follows daemon placement when that changes.
+ceph_host_memory_reserve_extra: "0"
 
 ceph_container_registry: "quay.io"
 ceph_container_registry_user: ""
