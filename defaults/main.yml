@@ -79,19 +79,25 @@ ceph_vm_cpus: ""
 # soft-lockups -- turning a whole-host outage into at most a single VM restart.
 # A backstop, not a scheduler input.
 #
-# Off by default: sizes are host-specific. Size from the measured
+# This is the RESERVE -- what is held back for the host and Ceph. The cap is
+# derived from each host's own MemTotal:
+#
+#     MemoryMax = MemTotal - ceph_host_memory_reserve
+#
+# so one value means the same thing on any host size. Applied as a hard cap
+# only; no MemoryHigh throttle band (see cephadm-mem-guard.yml for why).
+#
+# Off by default: the size is deployment-specific. Size from the measured
 # *unreclaimable* non-VM floor (daemon anon + kernel slab), NOT
 # system.slice memory.current -- most of which is reclaimable page cache.
 # Reserve = hard floor + Ceph recovery/backfill headroom + a free buffer.
-# Nodes with extra colocated services need a larger reserve, so set these
-# per host/group. Values are systemd sizes (1024-based).
-# Example, reserving 128 GiB on a 1133 GiB host:
+# Nodes with extra colocated services need a larger reserve, so set this
+# per host/group. systemd-style size, 1024-based.
+# Example:
 #   ceph_vm_memory_guard: true
-#   ceph_vm_memory_high: "945G"
-#   ceph_vm_memory_max: "1005G"
+#   ceph_host_memory_reserve: "128G"
 ceph_vm_memory_guard: false
-ceph_vm_memory_high: ""
-ceph_vm_memory_max: ""
+ceph_host_memory_reserve: ""
 
 ceph_container_registry: "quay.io"
 ceph_container_registry_user: ""
