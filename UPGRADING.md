@@ -74,6 +74,22 @@ The role labels every mon host `mgr` (`cephadm-host-labels.yml`), so on a
 Also confirm you are not about to trip over the environment-specific items in
 *Known role-specific gotchas* below.
 
+If the cluster runs NFS (`ceph nfs cluster ls` is non-empty), record the
+ganesha grace database for each NFS cluster. You need it for the Squid →
+Tentacle cleanup in *NFS: clear stale grace members* below. Run as root on a
+host with the admin keyring:
+
+```bash
+for c in $(ceph nfs cluster ls -f json | jq -r '.[]'); do
+  echo "== $c"
+  cephadm shell -- ganesha-rados-grace --pool .nfs --ns "$c" dump 2>/dev/null
+done
+```
+
+On Squid the members are named `nfs.<cluster>.<rank>` and should carry no
+flags. If any member already shows `N` or `E`, NFS is in grace now: sort that
+out before you start.
+
 ## 2. Quiesce the PG autoscaler
 
 PG splits or merges landing in the middle of an upgrade can stall daemon
@@ -126,6 +142,25 @@ ansible -m command -a 'cephadm --image quay.io/ceph/ceph:v20.2.3 pull' <ceph hos
 ceph orch upgrade start --image quay.io/ceph/ceph:v20.2.3
 ```
 
+**If the cluster runs NFS and you are going from Squid to Tentacle,** stage the
+upgrade so that NFS goes last, in a run of its own, while you are watching. As
+soon as the NFS daemons restart on Tentacle, NFS is down until you do the
+cleanup in *NFS: clear stale grace members* below. First upgrade every daemon
+type that comes before `nfs` in the order above:
+
+```bash
+ceph orch upgrade start --image quay.io/ceph/ceph:v20.2.3 \
+  --daemon-types mgr,mon,crash,osd,mds,rgw,rbd-mirror,cephfs-mirror,ceph-exporter,iscsi
+```
+
+When that finishes (`ceph orch upgrade status` shows `in_progress: false`),
+upgrade everything that is left, NFS included. Run the grace cleanup as soon
+as `ceph orch ps --daemon-type nfs` shows every NFS daemon on 20.2.z:
+
+```bash
+ceph orch upgrade start --image quay.io/ceph/ceph:v20.2.3
+```
+
 Monitor with any of:
 
 ```bash
@@ -163,6 +198,73 @@ A cluster left mid-upgrade is a normal, safe state — mixed-version daemons
 interoperate. Fix the cause and resume; do not try to force daemons forward
 with `ceph orch daemon redeploy`.
 
+### NFS: clear stale grace members (Squid → Tentacle)
+
+**Every Squid → Tentacle upgrade of a cluster that runs NFS needs this step,
+whether you upgrade by hand or let the role do it.** Without it NFS is down
+after the upgrade, but nothing reports a problem. `ceph -s` returns to
+`HEALTH_OK`, the NFS daemons show as running and listen on 2049, and clients
+can still mount. Clients just can't open or lock files, so their I/O hangs.
+
+The cause is the rados grace database that ganesha's `rados_cluster` recovery
+backend uses to coordinate grace periods across NFS daemons. Squid's cephadm
+registers each daemon there as `nfs.<cluster>.<rank>`, for example `nfs.fs.0`.
+Tentacle's uses the bare rank, `0`. When the NFS phase redeploys the daemons,
+they join under the new names, and the old members are left flagged `N` (still
+needs grace). Grace can only lift once no member carries `N`, and no running
+daemon uses the old names any more, so nothing clears the flag. NFS stays in
+grace indefinitely.
+
+The symptom in a daemon's log is this line every 10 seconds, with no
+`NOT IN GRACE` after it:
+
+```
+nfs_try_lift_grace :STATE :EVENT :check grace:reclaim complete(0) clid count(0)
+```
+
+The dump shows both sets of members:
+
+```
+cur=32 rec=31
+======================================================
+0        E
+1        E
+2        E
+nfs.fs.0        NE
+nfs.fs.1        NE
+nfs.fs.2        NE
+```
+
+**Fix.** Once every NFS daemon is on 20.2.z, remove the old-style members from
+each NFS cluster. Do not do this before then: the Squid daemons still use those
+names.
+
+```bash
+for c in $(ceph nfs cluster ls -f json | jq -r '.[]'); do
+  old=$(cephadm shell -- ganesha-rados-grace --pool .nfs --ns "$c" dump 2>/dev/null \
+        | awk -v p="nfs.$c." 'index($1, p) == 1 { print $1 }')
+  [ -n "$old" ] && cephadm shell -- \
+      ganesha-rados-grace --pool .nfs --ns "$c" remove $old
+done
+```
+
+Within about 10 seconds each daemon should leave grace:
+
+```bash
+journalctl -u 'ceph-*@nfs.*' --since -2min | grep 'NOT IN GRACE'   # on each NFS host
+```
+
+Each daemon also logs `Failed to remove rec-<epoch>:<rank>: -2` once. That is
+harmless: it is ENOENT for a recovery object that was never written under the
+new name. The old `rec-*:nfs.<cluster>.<rank>` objects in the `.nfs` pool are
+ignored from now on and can stay where they are.
+
+You only need to do this once per cluster. Tentacle never recreates the
+old-style members.
+
+Anything that had the export mounted while NFS was stuck (hypervisors, the
+CloudStack secondary storage VM) may still have hung I/O afterwards. Check it.
+
 ## 6. Verify and unwind
 
 ```bash
@@ -171,6 +273,12 @@ ceph versions                               # EVERY daemon on the new version
 ceph orch ps                                # all running, all on the new image
 ceph osd dump | grep require_osd_release    # should read 'tentacle'
 ceph health detail                          # back to HEALTH_OK
+
+# NFS only: members are bare ranks (0, 1, ...) with no flags, and there are
+# no nfs.<cluster>.<rank> members left
+for c in $(ceph nfs cluster ls -f json | jq -r '.[]'); do
+  cephadm shell -- ganesha-rados-grace --pool .nfs --ns "$c" dump 2>/dev/null
+done
 
 ceph osd pool unset noautoscale             # undo step 2
 ceph config rm mgr mgr/orchestrator/fail_fs # undo step 3, if you set it
@@ -243,6 +351,12 @@ The role does **not** stagger by daemon type, host or CRUSH bucket. If you want
 `--daemon-types`, `--hosts`, `--services`, `--limit` or `--crush_bucket_type`,
 drive the upgrade manually per the steps above.
 
+**The role does not clean up the NFS grace database either.** On a Squid →
+Tentacle upgrade of a cluster that runs NFS, NFS goes down during the NFS phase
+and stays down after the role reports success. Either drive that upgrade by hand
+with NFS staged last (step 5), or be ready to run *NFS: clear stale grace
+members* as soon as the role's upgrade wait returns.
+
 ## Known role-specific gotchas
 
 **Debian apt suites.** `cephadm-prereqs.yml` adds
@@ -273,3 +387,8 @@ full role run to complete after the upgrade.
 - [cephadm upgrade](https://docs.ceph.com/en/latest/cephadm/upgrade/)
 - [v20.2.0 Tentacle release notes](https://ceph.io/en/news/blog/2025/v20-2-0-tentacle-released/)
 - [cephadm adoption (native packages → cephadm)](https://docs.ceph.com/en/tentacle/cephadm/adoption/)
+- [cephadm staggered upgrade](https://docs.ceph.com/en/tentacle/cephadm/upgrade/#staggered-upgrade)
+- [ganesha-rados-grace(8)](https://www.mankier.com/8/ganesha-rados-grace)
+- cephadm `services/nfs.py`, where the grace nodeid changed:
+  [squid](https://github.com/ceph/ceph/blob/squid/src/pybind/mgr/cephadm/services/nfs.py)
+  vs [tentacle](https://github.com/ceph/ceph/blob/tentacle/src/pybind/mgr/cephadm/services/nfs.py)
