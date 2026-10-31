@@ -40,19 +40,25 @@
   failed_when: _normalize_upgrade_status.rc not in [0, 2]
   delegate_to: "{{ ceph_bootstrap_node }}"
 
+# Only JSON is parsed: from Tentacle (20.x) on, an idle orchestrator answers
+# "There are no upgrades in progress currently." even with --format json
+# (cephadm-version.yml has the details).
 - name: "Normalize: record orchestrator upgrade state"
   ansible.builtin.set_fact:
-    _normalize_upgrade_active: >-
-      {{ (_normalize_upgrade_status.stdout | default('') | trim | default('{}', true)
-          | from_json).in_progress | default(false) | bool }}
+    _normalize_upgrade: >-
+      {{ (_normalize_upgrade_out | from_json) if _normalize_upgrade_out.startswith('{') else {} }}
+  vars:
+    _normalize_upgrade_out: "{{ _normalize_upgrade_status.stdout | default('') | trim }}"
+
+- name: "Normalize: record whether an upgrade is active"
+  ansible.builtin.set_fact:
+    _normalize_upgrade_active: "{{ _normalize_upgrade.in_progress | default(false) | bool }}"
 
 - name: "Normalize: skip while an orchestrated upgrade is running"
   ansible.builtin.debug:
     msg: >-
       `ceph orch upgrade` is in progress
-      (target {{ (_normalize_upgrade_status.stdout | default('') | trim
-                  | default('{}', true) | from_json).target_image
-                 | default('unknown') }}).
+      (target {{ _normalize_upgrade.target_image | default('unknown') }}).
       Skipping container image normalization: forcing
       `ceph orch daemon redeploy` now would bypass the upgrade's ordering
       and ok-to-stop checks. Re-run the role once the upgrade completes.

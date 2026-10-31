@@ -79,16 +79,19 @@
       failed_when: _upgrade_status_check.rc not in [0, 2]
       when: ceph_deployment_mode == 'cephadm'
 
-    # `| default('{}')` alone does NOT substitute for an empty string --
-    # only for an undefined value -- so an rc=2 status call with no stdout
-    # used to blow up `from_json`. The second argument makes `default`
-    # fire on any falsy value.
+    # Only JSON is parsed. An rc=2 status call has no stdout, and from Tentacle
+    # (20.x) on `ceph orch upgrade status` ignores `--format json` when no
+    # upgrade is running and prints "There are no upgrades in progress
+    # currently." Both mean idle, so anything not starting with `{` reads as
+    # `{}`. The same applies to every other read of this command.
     - name: "Cephadm: determine what this run has to do"
       ansible.builtin.set_fact:
         _ceph_upgrade_needed: "{{ _ceph_deployed_vers != [ceph_version] }}"
         _ceph_upgrade_in_progress: >-
-          {{ (_upgrade_status_check.stdout | default('') | trim | default('{}', true)
-              | from_json).in_progress | default(false) | bool }}
+          {{ ((_upgrade_status_out | from_json) if _upgrade_status_out.startswith('{') else {}
+             ).in_progress | default(false) | bool }}
+      vars:
+        _upgrade_status_out: "{{ _upgrade_status_check.stdout | default('') | trim }}"
       when: ceph_deployment_mode == 'cephadm'
 
     # -------------------------------------------------------------------
@@ -210,8 +213,9 @@
       ansible.builtin.command: ceph orch upgrade status --format json
       register: _upgrade_wait
       vars:
+        _upgrade_wait_out: "{{ _upgrade_wait.stdout | default('') | trim }}"
         _st: >-
-          {{ _upgrade_wait.stdout | default('') | trim | default('{}', true) | from_json }}
+          {{ (_upgrade_wait_out | from_json) if _upgrade_wait_out.startswith('{') else {} }}
       until: >-
         not (_st.in_progress | default(false) | bool) or
         (_st.is_paused | default(false) | bool)
@@ -242,8 +246,9 @@
           `ceph osd pool unset noautoscale` if you abandon the upgrade.
           {% endif %}
       vars:
+        _upgrade_wait_out: "{{ _upgrade_wait.stdout | default('') | trim }}"
         _st: >-
-          {{ _upgrade_wait.stdout | default('') | trim | default('{}', true) | from_json }}
+          {{ (_upgrade_wait_out | from_json) if _upgrade_wait_out.startswith('{') else {} }}
       when:
         - ceph_deployment_mode == 'cephadm'
         - _upgrade_wait is defined
