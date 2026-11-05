@@ -497,6 +497,13 @@
   ansible.builtin.import_tasks: cephadm-mem-guard.yml
 
 # -----------------------------------------------------------------------
+# Host maintenance helper (all nodes) -- `ceph-host-maint enter|exit|status`
+# -----------------------------------------------------------------------
+
+- name: "Install the ceph-host-maint helper"
+  ansible.builtin.import_tasks: cephadm-maint-script.yml
+
+# -----------------------------------------------------------------------
 # Prometheus (bootstrap node, optional)
 # -----------------------------------------------------------------------
 

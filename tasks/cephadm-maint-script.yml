@@ -1,0 +1,17 @@
+---
+# Install `ceph-host-maint` on every cluster host. It wraps
+# `ceph orch host maintenance enter|exit` so a hyperconverged host rejoins
+# gently: primaries are moved off its OSDs before it leaves, and on exit the
+# OSDs are held with per-OSD `noup` and released one at a time, waiting for
+# peering and recovery between each. A whole host rejoining at once caused
+# slow ops that stalled etcd on hyperconverged VMs. See the script header
+# and README "Host maintenance".
+
+- name: "Host maintenance | Install ceph-host-maint"
+  ansible.builtin.copy:
+    src: ceph-host-maint
+    dest: /usr/local/sbin/ceph-host-maint
+    owner: root
+    group: root
+    mode: "0755"
+  when: ceph_host_maint_script | bool

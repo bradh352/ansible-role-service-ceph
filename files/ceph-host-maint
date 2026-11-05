@@ -1,0 +1,606 @@
+#!/usr/bin/env bash
+#
+# ceph-host-maint -- take a hyperconverged Ceph host in and out of
+# maintenance without stalling client I/O.
+#
+# Installed by the service_ceph Ansible role; local edits are overwritten.
+#
+# `ceph orch host maintenance exit` restarts every OSD on the host at once.
+# Each OSD comes back with stale data and is immediately used as a primary,
+# so a whole host rejoining produces a burst of peering and slow ops that
+# stalls fsync-heavy clients on hyperconverged VMs (etcd members lose
+# leadership on every rejoin). Leaving is cheap by comparison.
+#
+# This wrapper:
+#   enter   checks the host can be stopped (failing over an active mgr
+#           first), sets per-OSD noout, moves primaries off the host's OSDs
+#           (primary-affinity 0, one OSD at a time), then runs
+#           `ceph orch host maintenance enter`. The OSDs stay down across any
+#           number of reboots until `exit`.
+#   exit    holds the OSDs with per-OSD noup, runs
+#           `ceph orch host maintenance exit`, then releases one OSD at a time
+#           and waits for peering/recovery to finish before the next. It then
+#           restores the saved primary affinity, again one OSD at a time.
+#   status  shows the host's maintenance state, OSD flags and PG summary.
+#
+# enter and exit are both safe to re-run after an interruption: they resume
+# where they stopped.
+#
+# Per-OSD flags are used deliberately: `ceph osd set-group noup <host>` sets a
+# CRUSH-node flag that `ceph osd unset-group noup osd.N` cannot clear, so the
+# OSDs could not be released one at a time.
+#
+# Saved primary affinity lives in the cluster config-key store, so `exit` can
+# be run from any host with the admin keyring, including the host itself
+# after it reboots.
+
+set -euo pipefail
+
+PROG=${0##*/}
+SETTLE_TIMEOUT=${CEPH_HOST_MAINT_SETTLE_TIMEOUT:-1800}  # max wait for PGs to settle, seconds
+BOOT_TIMEOUT=${CEPH_HOST_MAINT_BOOT_TIMEOUT:-900}       # max wait for daemons / an OSD to come up
+BOOT_SETTLE=${CEPH_HOST_MAINT_BOOT_SETTLE:-30}          # pause after daemons start, before releasing OSDs
+SLOW_OPS_WAIT=${CEPH_HOST_MAINT_SLOW_OPS_WAIT:-120}     # extra wait for SLOW_OPS to clear (soft)
+POLL=${CEPH_HOST_MAINT_POLL:-5}
+FORCE=${CEPH_HOST_MAINT_FORCE:-0}                       # 1 = enter even if PGs are not active+clean
+KEY_PREFIX="ceph-host-maint"
+
+# The mgr's pgmap lags the osdmap by a stats period or two, so one "settled"
+# sample straight after a change can be stale. Require this many in a row,
+# POLL seconds apart.
+SETTLED_SAMPLES=3
+
+# PG states that mean "still moving". Matched as substrings of
+# `pgmap.pgs_by_state[].state_name`.
+#   PEERING_STATES  what a primary-affinity change causes. These block I/O.
+#   BUSY_STATES     what an OSD rejoining causes. Recovery also blocks I/O
+#                   to the objects being recovered, so wait for it too.
+PEERING_STATES="peering,activating,unknown"
+BUSY_STATES="$PEERING_STATES,recovering,recovery_wait,backfilling,backfill_wait"
+
+usage() {
+  cat >&2 <<EOF
+Usage: $PROG {enter|exit|status} [host] [-- extra args for 'ceph orch host maintenance']
+
+  enter   Drain primaries off the host's OSDs and put it into cephadm maintenance.
+  exit    Bring the host out of maintenance and rejoin its OSDs one at a time.
+  status  Show maintenance state, OSD flags and PG summary for the host.
+
+host defaults to this machine. Short names and FQDNs are both accepted. A
+host that is not in the Ceph cluster (or has no OSDs or Ceph services) is a
+no-op when defaulted, and an error when named explicitly.
+
+Extra args go to 'ceph orch host maintenance enter|exit', e.g.
+'exit <host> -- --force' for a host that is offline. enter adds --force
+itself when cephadm's only objection is RGW/NFS-style warnings and every
+affected service still runs on another host.
+
+Environment (seconds unless noted):
+  CEPH_HOST_MAINT_SETTLE_TIMEOUT  ($SETTLE_TIMEOUT)  wait for PGs to settle
+  CEPH_HOST_MAINT_BOOT_TIMEOUT    ($BOOT_TIMEOUT)  wait for daemons / an OSD to come up
+  CEPH_HOST_MAINT_BOOT_SETTLE     ($BOOT_SETTLE)  pause after daemons start
+  CEPH_HOST_MAINT_SLOW_OPS_WAIT   ($SLOW_OPS_WAIT)  extra wait for SLOW_OPS to clear
+  CEPH_HOST_MAINT_FORCE           ($FORCE)  1 = enter even if PGs are not clean
+EOF
+  exit 2
+}
+
+log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+# Never hang forever on an unreachable monitor.
+ceph() { command ceph --connect-timeout 60 "$@"; }
+
+# Run an inline Python snippet with JSON on stdin. -I keeps it isolated from
+# the caller's environment and working directory.
+py() { local code=$1; shift; python3 -I -c "$code" "$@"; }
+
+has_extra_arg() {
+  local a
+  for a in "${EXTRA_ARGS[@]}"; do [ "$a" = "$1" ] && return 0; done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Lookups
+# ---------------------------------------------------------------------------
+
+# resolve_host <name> <explicit:0|1>
+resolve_host() {
+  local want=$1 explicit=$2 match
+  match=$(ceph orch host ls -f json | py '
+import json, sys
+want = sys.argv[1]
+hosts = [h["hostname"] for h in json.load(sys.stdin)]
+exact = [h for h in hosts if h == want]
+short = [h for h in hosts if h.split(".")[0] == want.split(".")[0]]
+m = exact or short
+print("\n".join(m))
+' "$want")
+  if [ -z "$match" ]; then
+    if [ "$explicit" = 1 ]; then
+      die "'$want' is not a host in 'ceph orch host ls'"
+    fi
+    log "this machine ('$want') is not a host in 'ceph orch host ls'; nothing to do"
+    exit 0
+  fi
+  if [ "$(printf '%s\n' "$match" | wc -l)" -gt 1 ]; then
+    die "'$want' matches more than one host: $(echo $match)"
+  fi
+  ORCH_HOST=$match
+  # cephadm itself uses the short name as the CRUSH host bucket (see
+  # enter_host_maintenance in the cephadm mgr module).
+  CRUSH_HOST=${ORCH_HOST%%.*}
+  KEY="$KEY_PREFIX/$CRUSH_HOST/primary-affinity"
+  mapfile -t OSDS < <(ceph osd ls-tree "$CRUSH_HOST" 2>/dev/null || true)
+
+  # Cross-check against the orchestrator, so a CRUSH layout we do not
+  # understand can never be mistaken for "no OSDs here".
+  local orch_osds
+  orch_osds=$(ceph orch ps "$ORCH_HOST" --daemon-type osd -f json | py '
+import json, sys
+print(" ".join(sorted(d["daemon_id"] for d in json.load(sys.stdin))))
+')
+  if [ -n "$orch_osds" ] && ((${#OSDS[@]} == 0)); then
+    die "cephadm runs OSDs ($orch_osds) on $ORCH_HOST, but CRUSH bucket '$CRUSH_HOST' has none"
+  fi
+}
+
+osd_names() { local id; for id in "${OSDS[@]}"; do printf 'osd.%s ' "$id"; done; }
+
+# Daemons on the host that matter to the cluster beyond OSDs. Hosts that are
+# only *eligible* for OSDs (the spec would create them if disks were
+# attached) carry nothing but crash/node-exporter style agents.
+service_daemons() {
+  ceph orch ps "$ORCH_HOST" -f json | py '
+import json, sys
+skip = {"osd", "crash", "node-exporter", "ceph-exporter", "agent"}
+print(" ".join(sorted({d["daemon_type"] for d in json.load(sys.stdin)} - skip)))
+'
+}
+
+# True when there is nothing on this host worth a maintenance cycle.
+nothing_to_do() {
+  ((${#OSDS[@]} == 0)) && [ -z "$(service_daemons)" ]
+}
+
+# `orch host ls` reports a host that is in maintenance but not yet reachable
+# (e.g. just rebooted) as "Offline", hiding the maintenance state, so also
+# consult the HOST_IN_MAINTENANCE health check, which lists it either way.
+in_maintenance() {
+  local hosts health
+  hosts=$(ceph orch host ls -f json)
+  health=$(ceph health detail -f json)
+  [ "$(py '
+import json, sys
+host = sys.argv[1]
+orch = any(h["hostname"] == host and h.get("status", "").lower() == "maintenance"
+           for h in json.loads(sys.argv[2]))
+checks = json.loads(sys.argv[3]).get("checks", {})
+msgs = [d.get("message", "") for d in checks.get("HOST_IN_MAINTENANCE", {}).get("detail", [])]
+print(orch or any(m.split()[:1] == [host] for m in msgs))
+' "$ORCH_HOST" "$hosts" "$health")" = True ]
+}
+
+# One line per OSD on the host: id up in primary_affinity flags
+osd_table() {
+  ((${#OSDS[@]})) || return 0
+  ceph osd dump -f json | py '
+import json, sys
+want = {int(i) for i in sys.argv[1:]}
+for o in sorted(json.load(sys.stdin)["osds"], key=lambda o: o["osd"]):
+    if o["osd"] in want:
+        flags = [s for s in o["state"] if s in ("noup", "nodown", "noin", "noout")]
+        print(o["osd"], o["up"], o["in"], o["primary_affinity"], ",".join(flags) or "-")
+' "${OSDS[@]}"
+}
+
+osd_is_up() { [ "$(osd_table | awk -v id="$1" '$1 == id { print $2 }')" = 1 ]; }
+osds_all_down() { [ -z "$(osd_table | awk '$2 == 1')" ]; }
+osd_affinity() { osd_table | awk -v id="$1" '$1 == id { print $4 }'; }
+# same_number <a> <b>: numeric compare, so "1" and "1.0" match.
+same_number() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 == b + 0) }'; }
+
+global_flag_set() {
+  ceph osd dump -f json | py '
+import json, sys
+print(sys.argv[1] in json.load(sys.stdin).get("flags", "").split(","))
+' "$1" | grep -qx True
+}
+
+# OSD daemons on the host that cephadm does not report as running.
+osd_daemons_not_running() {
+  ceph orch ps "$ORCH_HOST" --daemon-type osd --refresh -f json | py '
+import json, sys
+running = {d["daemon_id"] for d in json.load(sys.stdin) if d.get("status_desc") == "running"}
+print(" ".join("osd." + i for i in sys.argv[1:] if i not in running))
+' "${OSDS[@]}"
+}
+osd_daemons_running() { [ -z "$(osd_daemons_not_running)" ]; }
+
+pg_summary() {
+  ceph status -f json | py '
+import json, sys
+s = json.load(sys.stdin)["pgmap"].get("pgs_by_state", [])
+print(", ".join("%d %s" % (x["count"], x["state_name"]) for x in s))
+'
+}
+
+pgs_matching() {
+  ceph status -f json | py '
+import json, sys
+pats = sys.argv[1].split(",")
+s = json.load(sys.stdin)["pgmap"].get("pgs_by_state", [])
+print(sum(x["count"] for x in s if any(p in x["state_name"] for p in pats)))
+' "$1"
+}
+
+pgs_not_clean() {
+  ceph status -f json | py '
+import json, sys
+s = json.load(sys.stdin)["pgmap"].get("pgs_by_state", [])
+print(sum(x["count"] for x in s if not x["state_name"].startswith("active+clean")))
+'
+}
+
+no_slow_ops() {
+  ceph health detail -f json | py '
+import json, sys
+print("SLOW_OPS" not in json.load(sys.stdin).get("checks", {}))
+' | grep -qx True
+}
+
+# pgs_settled <states>: no PGs in <states> for SETTLED_SAMPLES samples in a row.
+pgs_settled() {
+  local n
+  for ((n = 1; n <= SETTLED_SAMPLES; n++)); do
+    [ "$(pgs_matching "$1")" = 0 ] || return 1
+    ((n == SETTLED_SAMPLES)) || sleep "$POLL"
+  done
+}
+
+# wait_for <description> <timeout> <command...>
+wait_for() {
+  local desc=$1 timeout=$2 start=$SECONDS
+  shift 2
+  until "$@"; do
+    if (( SECONDS - start >= timeout )); then
+      log "timed out after ${timeout}s waiting for $desc ($(pg_summary))"
+      return 1
+    fi
+    sleep "$POLL"
+  done
+}
+
+# settle <states> <description>: wait for the PGs, then give any slow ops a
+# short, non-fatal chance to drain before the next change.
+settle() {
+  sleep "$POLL"
+  wait_for "PGs to settle $2" "$SETTLE_TIMEOUT" pgs_settled "$1" || return 1
+  wait_for "SLOW_OPS to clear $2" "$SLOW_OPS_WAIT" no_slow_ops \
+    || log "WARNING: SLOW_OPS still reported; continuing"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+  local state="active"
+  in_maintenance && state="maintenance"
+  printf 'host:          %s (crush: %s)\n' "$ORCH_HOST" "$CRUSH_HOST"
+  printf 'orchestrator:  %s\n' "$state"
+  printf 'saved affinity: %s\n' "$(ceph config-key get "$KEY" 2>/dev/null || echo none)"
+  printf 'cluster flags: %s\n' "$(ceph osd dump -f json | py '
+import json, sys
+d = json.load(sys.stdin)
+host = sys.argv[1]
+f = [x for x in d.get("flags", "").split(",") if x in ("noout", "noup", "nodown", "noin", "norebalance", "norecover", "nobackfill")]
+node = d.get("crush_node_flags", {}).get(host, [])
+print(",".join(f) or "-", "| crush node", host + ":", ",".join(node) or "-")
+' "$CRUSH_HOST")"
+  printf 'pgs:           %s\n' "$(pg_summary)"
+  if ((${#OSDS[@]})); then
+    printf '\n%-8s %-4s %-4s %-9s %s\n' OSD UP IN AFFINITY FLAGS
+    osd_table | awk '{ printf "osd.%-4s %-4s %-4s %-9s %s\n", $1, $2, $3, $4, $5 }'
+  else
+    printf '\n(no OSDs on this host; services: %s)\n' "$(service_daemons | sed 's/^$/none/')"
+  fi
+}
+
+# Fail before changing anything if cephadm would refuse the host.
+preflight_enter() {
+  # An active mgr on the host is an ALERT that --force does not bypass.
+  local active mgr_ids
+  active=$(ceph mgr stat -f json | py 'import json, sys; print(json.load(sys.stdin).get("active_name", ""))')
+  mgr_ids=$(ceph orch ps "$ORCH_HOST" --daemon-type mgr -f json | py '
+import json, sys
+print(" ".join(d["daemon_id"] for d in json.load(sys.stdin)))
+')
+  if [ -n "$active" ] && [[ " $mgr_ids " == *" $active "* ]]; then
+    local standbys
+    standbys=$(ceph mgr stat -f json | py 'import json, sys; print(json.load(sys.stdin).get("num_standby", 0))')
+    [ "$standbys" -gt 0 ] || die "active mgr $active is on $ORCH_HOST and there is no standby to fail over to"
+    log "failing over active mgr $active"
+    ceph mgr fail "$active"
+    wait_for "a standby mgr to take over" 120 mgr_moved_off "$active" \
+      || die "mgr did not fail over; re-run when 'ceph mgr stat' shows a new active"
+  fi
+
+  # cephadm refuses with WARNINGs whenever a host runs rgw/nfs-style
+  # daemons, however many other instances there are. Its --force bypasses
+  # exactly those WARNINGs and nothing else (not a mon/osd/mds refusal, not
+  # an active mgr). So: if every line of the refusal is such a WARNING and
+  # each affected service still has a running daemon on another active
+  # host, pass --force ourselves. Anything else stops here, before any
+  # change is made. How clients find the surviving daemons (VIP, DNS,
+  # client-side lists) is the job of whatever fronts the service.
+  local out
+  if ! out=$(ceph orch host ok-to-stop "$ORCH_HOST" 2>&1); then
+    local verdict
+    verdict=$(ceph orch ps -f json | py '
+import json, re, sys
+host, refusal, hosts_json = sys.argv[1], sys.argv[2], sys.argv[3]
+daemons = json.load(sys.stdin)
+types, other = set(), []
+for line in refusal.splitlines():
+    line = re.sub(r"^Error E[A-Z]+: ", "", line).strip()
+    if not line:
+        continue
+    m = re.match(r"WARNING: Removing (\S+) daemons can cause clients to lose connectivity", line)
+    if m:
+        types.add(m.group(1).lower())
+    else:
+        other.append(line)
+if other:
+    print("REFUSE " + " | ".join(other))
+    sys.exit()
+down = {h["hostname"] for h in json.loads(hosts_json)
+        if h.get("status", "").lower() in ("maintenance", "offline")}
+problems, covered = [], []
+for t in sorted(types):
+    mine = {d.get("service_name") for d in daemons
+            if d["daemon_type"] == t and d["hostname"] == host}
+    if not mine:
+        problems.append(f"cephadm warned about {t} but no {t} daemon is on this host")
+    for svc in sorted(mine):
+        peers = sorted(d["hostname"].split(".")[0] for d in daemons
+                       if d.get("service_name") == svc and d["hostname"] != host
+                       and d["hostname"] not in down and d.get("status_desc") == "running")
+        if peers:
+            covered.append("%s (also on %s)" % (svc, ",".join(peers)))
+        else:
+            problems.append(f"{svc} has no running daemon on another active host")
+if problems:
+    print("REFUSE " + "; ".join(problems))
+else:
+    print("OK " + ", ".join(covered))
+' "$ORCH_HOST" "$out" "$(ceph orch host ls -f json)")
+    case "$verdict" in
+      OK\ *)
+        log "cephadm warns that stopping ${verdict#OK } may affect clients; each still runs on another host, so passing --force"
+        has_extra_arg --force || EXTRA_ARGS+=(--force)
+        ;;
+      *)
+        printf '%s\n' "$out" >&2
+        verdict=${verdict#REFUSE }
+        die "cephadm says $ORCH_HOST is not ok to stop: ${verdict%.}. Nothing has been changed."
+        ;;
+    esac
+  fi
+}
+
+mgr_moved_off() {
+  local now
+  now=$(ceph mgr stat -f json | py '
+import json, sys
+d = json.load(sys.stdin)
+print(d.get("active_name", "") if d.get("available") else "")
+')
+  [ -n "$now" ] && [ "$now" != "$1" ]
+}
+
+cmd_enter() {
+  if in_maintenance; then
+    log "$ORCH_HOST is already in maintenance"
+    cmd_status
+    return 0
+  fi
+  if nothing_to_do; then
+    log "$ORCH_HOST has no OSDs or Ceph services; nothing to do"
+    return 0
+  fi
+
+  local notclean
+  notclean=$(pgs_not_clean)
+  if [ "$notclean" != 0 ] && [ "$FORCE" != 1 ]; then
+    die "$notclean PGs are not active+clean ($(pg_summary)). Wait for the cluster to recover, or set CEPH_HOST_MAINT_FORCE=1."
+  fi
+
+  preflight_enter
+
+  if ((${#OSDS[@]})); then
+    if ! ceph config-key exists "$KEY" >/dev/null 2>&1; then
+      local saved
+      saved=$(osd_table | awk '{ printf "%s%s=%s", (NR > 1 ? " " : ""), $1, $4 }')
+      if osd_table | awk '$4 + 0 == 0 { found = 1 } END { exit !found }'; then
+        log "WARNING: some OSDs already have primary affinity 0; saving that as their normal value"
+      fi
+      ceph config-key set "$KEY" "$saved" >/dev/null 2>&1
+      log "saved primary affinity: $saved"
+    else
+      log "keeping previously saved primary affinity: $(ceph config-key get "$KEY")"
+    fi
+
+    # Per-OSD noout, in addition to the CRUSH-node noout cephadm sets, so the
+    # OSDs are never marked out however long the host stays down.
+    # shellcheck disable=SC2046
+    ceph osd set-group noout $(osd_names)
+    log "set noout on $(osd_names)"
+
+    # All at once: this only hands the primary role to replicas that are
+    # already current, the same brief peering a host leaving causes. The
+    # pacing that matters is on the rejoin side (cmd_exit).
+    local id changed=()
+    for id in "${OSDS[@]}"; do
+      same_number "$(osd_affinity "$id")" 0 && continue
+      ceph osd primary-affinity "osd.$id" 0 >/dev/null 2>&1 \
+        || die "could not set primary affinity on osd.$id; re-run '$PROG enter $CRUSH_HOST' to continue"
+      changed+=("osd.$id")
+    done
+    if ((${#changed[@]})); then
+      log "moved primaries off ${changed[*]}"
+      settle "$PEERING_STATES" "after moving primaries off $CRUSH_HOST" \
+        || die "PGs did not settle; re-run '$PROG enter $CRUSH_HOST' to continue"
+    fi
+  fi
+
+  log "entering cephadm maintenance on $ORCH_HOST"
+  ceph orch host maintenance enter "$ORCH_HOST" "${EXTRA_ARGS[@]}" \
+    || die "'ceph orch host maintenance enter' failed. Primaries are already off the host and noout is set; fix the cause and re-run '$PROG enter $CRUSH_HOST', or undo with '$PROG exit $CRUSH_HOST'"
+
+  if ((${#OSDS[@]})); then
+    wait_for "OSDs on $CRUSH_HOST to stop" "$BOOT_TIMEOUT" osds_all_down \
+      || log "WARNING: some OSDs on $CRUSH_HOST still report up"
+  fi
+  log "done. $CRUSH_HOST can be rebooted as often as needed. Finish with: $PROG exit $CRUSH_HOST"
+}
+
+restore_affinity() {
+  local saved pair id aff cur
+  if ! saved=$(ceph config-key get "$KEY" 2>/dev/null); then
+    log "no saved primary affinity for $CRUSH_HOST; leaving it unchanged"
+    if osd_table | awk '$4 + 0 == 0 { found = 1 } END { exit !found }'; then
+      log "WARNING: some OSDs on $CRUSH_HOST have primary affinity 0"
+    fi
+    return 0
+  fi
+  # All at once, like enter: every OSD has finished recovering by now, so
+  # this only hands primaries back to current replicas.
+  local changed=()
+  for pair in $saved; do
+    id=${pair%%=*}
+    aff=${pair#*=}
+    cur=$(osd_affinity "$id")
+    if [ -z "$cur" ]; then
+      log "osd.$id is no longer on $CRUSH_HOST; skipping its saved affinity ($aff)"
+      continue
+    fi
+    same_number "$cur" "$aff" && continue
+    ceph osd primary-affinity "osd.$id" "$aff" >/dev/null 2>&1 \
+      || die "could not restore primary affinity on osd.$id; re-run '$PROG exit $CRUSH_HOST' to continue"
+    changed+=("osd.$id=$aff")
+  done
+  if ((${#changed[@]})); then
+    log "restored primary affinity: ${changed[*]}"
+    settle "$PEERING_STATES" "after restoring primary affinity" \
+      || die "PGs did not settle; re-run '$PROG exit $CRUSH_HOST' to continue"
+  fi
+  ceph config-key rm "$KEY" >/dev/null 2>&1
+}
+
+cmd_exit() {
+  if ! in_maintenance && nothing_to_do; then
+    log "$ORCH_HOST has no OSDs or Ceph services and is not in maintenance; nothing to do"
+    return 0
+  fi
+
+  if ((${#OSDS[@]})); then
+    if global_flag_set noup; then
+      die "the cluster-wide noup flag is set, so no OSD can come up. Clear it ('ceph osd unset noup') and re-run"
+    fi
+    # Hold every OSD down before the daemons start. Harmless on OSDs that
+    # are already up; it only stops a down OSD from being marked up.
+    # shellcheck disable=SC2046
+    ceph osd set-group noup $(osd_names)
+    log "holding $(osd_names) with noup"
+  fi
+
+  if in_maintenance; then
+    log "exiting cephadm maintenance on $ORCH_HOST"
+    ceph orch host maintenance exit "$ORCH_HOST" "${EXTRA_ARGS[@]}" \
+      || die "'ceph orch host maintenance exit' failed; the OSDs are held with noup. Fix the cause (an offline host needs '-- --force') and re-run '$PROG exit $CRUSH_HOST'"
+  else
+    log "$ORCH_HOST is not in cephadm maintenance; resuming OSD rejoin"
+  fi
+
+  if ((${#OSDS[@]})); then
+    if ! wait_for "OSD daemons on $ORCH_HOST to start" "$BOOT_TIMEOUT" osd_daemons_running; then
+      die "not running: $(osd_daemons_not_running). All OSDs on $CRUSH_HOST are still held with noup. Fix the host and re-run '$PROG exit $CRUSH_HOST'. If an OSD is dead for good, remove it from Ceph first."
+    fi
+    log "letting OSDs settle for ${BOOT_SETTLE}s"
+    sleep "$BOOT_SETTLE"
+
+    local id
+    for id in "${OSDS[@]}"; do
+      # Check before releasing: an OSD that was already up (e.g. on a
+      # resumed run) only needs its flag cleared, not a settle wait.
+      if osd_is_up "$id"; then
+        ceph osd unset-group noup "osd.$id"
+        continue
+      fi
+      log "releasing osd.$id"
+      ceph osd unset-group noup "osd.$id"
+      wait_for "osd.$id to come up" "$BOOT_TIMEOUT" osd_is_up "$id" \
+        || die "osd.$id did not come up; the remaining OSDs are still held with noup. Re-run '$PROG exit $CRUSH_HOST' to resume"
+      settle "$BUSY_STATES" "after osd.$id joined" \
+        || die "PGs did not settle after osd.$id joined; re-run '$PROG exit $CRUSH_HOST' to resume"
+    done
+
+    # shellcheck disable=SC2046
+    ceph osd unset-group noout $(osd_names)
+    log "cleared noout on $(osd_names)"
+
+    # Only this host's recovery matters here; the cluster may be unclean for
+    # unrelated reasons (another host down, scrub errors).
+    settle "$BUSY_STATES" "before restoring primary affinity" \
+      || die "recovery has not finished; primary affinity has not been restored yet. Re-run '$PROG exit $CRUSH_HOST' later"
+    restore_affinity
+  fi
+  log "done. $ORCH_HOST is back in service ($(pg_summary))"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+[ $# -ge 1 ] || usage
+CMD=$1
+shift
+HOST_ARG=""
+if [ $# -ge 1 ] && [ "$1" != "--" ]; then
+  HOST_ARG=$1
+  shift
+fi
+EXTRA_ARGS=()
+if [ $# -ge 1 ] && [ "$1" = "--" ]; then
+  shift
+  EXTRA_ARGS=("$@")
+elif [ $# -ge 1 ]; then
+  usage
+fi
+
+case "$CMD" in
+  enter|exit|status) ;;
+  *) usage ;;
+esac
+
+EXPLICIT=1
+if [ -z "$HOST_ARG" ]; then
+  HOST_ARG=$(hostname -s)
+  EXPLICIT=0
+fi
+
+[ "$(id -u)" = 0 ] || die "must run as root (needs the Ceph admin keyring)"
+command -v ceph >/dev/null || die "ceph CLI not found"
+command -v python3 >/dev/null || die "python3 not found"
+ceph -s >/dev/null 2>&1 || die "cannot talk to the cluster ('ceph -s' failed); is the admin keyring in /etc/ceph?"
+
+resolve_host "$HOST_ARG" "$EXPLICIT"
+
+if [ "$CMD" != status ]; then
+  exec 9>"/run/lock/$PROG.$CRUSH_HOST.lock"
+  flock -n 9 || die "another $PROG run for $CRUSH_HOST is in progress on this machine"
+fi
+
+"cmd_$CMD"

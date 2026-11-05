@@ -327,6 +327,77 @@ environment-specific gotchas to check first.
 
 ---
 
+## Host maintenance
+
+Use `ceph-host-maint` (installed on every cluster host; disable with
+`ceph_host_maint_script: false`) instead of calling
+`ceph orch host maintenance` directly:
+
+```bash
+sudo ceph-host-maint enter ceph04   # before rebooting or servicing ceph04
+sudo ceph-host-maint status ceph04
+sudo ceph-host-maint exit ceph04    # when ceph04 is back
+```
+
+`ceph orch host maintenance exit` restarts all of a host's OSDs at once. Each
+one rejoins with stale data and is used as a primary immediately, and the
+resulting burst of peering and slow ops stalls fsync-heavy clients on the
+hyperconverged VMs (etcd on k8s control nodes in particular). Leaving is
+cheap; rejoining is not.
+
+* `enter` first checks that cephadm will accept the host
+  (`ceph orch host ok-to-stop`), failing over an active mgr on it, and stops
+  before changing anything if it would not. cephadm always warns that
+  stopping RGW or NFS daemons may cut clients off, however many other
+  instances exist; when every service it warns about still has a running
+  daemon on another active host, `enter` passes `--force` itself. Moving
+  clients to the surviving daemons is left to whatever fronts the service
+  (a VIP, DNS). Any other refusal (an active mgr with no standby, an
+  OSD/mon that is unsafe to stop, a service with no other instance) is not
+  overridden. It then saves each OSD's primary affinity in the config-key
+  store, sets per-OSD `noout`, moves primaries off the host
+  (`primary-affinity 0` on all of its OSDs at once, then one wait for
+  peering), and enters cephadm maintenance. The OSDs stay down across any
+  number of reboots until `exit`.
+* `exit` holds the host's OSDs with per-OSD `noup`, exits cephadm
+  maintenance, then releases one OSD at a time. Before releasing the next it
+  waits for peering and recovery to finish and gives any slow ops a short
+  chance to clear. It then clears `noout` and restores the saved primary
+  affinity, all at once. It does not wait for the whole cluster to be
+  `active+clean`, only for this host's recovery, so unrelated problems
+  elsewhere do not block it.
+* `status` shows the maintenance state, per-OSD flags, primary affinity and
+  a PG summary.
+
+Only the rejoin is paced. Moving primaries off a host, and back once it has
+recovered, just hands the primary role to replicas that are already current,
+which is the same short peering a host leaving causes, so it is done in one
+step.
+
+"Settled" means no PGs in a busy state for three samples in a row, because
+the mgr's PG stats lag the OSD map by a few seconds.
+
+Hosts with no OSDs (for example ones that are only eligible for OSDs if disks
+are attached) and no mon/mgr/mds/rgw/nfs daemons are a no-op, exiting 0. A
+host with no OSDs that does run those services still goes through cephadm
+maintenance. A name that is not in `ceph orch host ls` is an error, so a typo
+cannot pass for a successful drain. Only a defaulted host (the local machine)
+that is not a Ceph host is a silent no-op.
+
+`enter` and `exit` can both be re-run safely; they resume where they stopped
+(for example after a timeout) and skip OSDs that are already done. Because
+state lives in the cluster, `exit` works from any host with the admin
+keyring, including the host itself after it reboots. The host defaults to the
+local machine; short names and FQDNs are both accepted. Arguments after `--`
+go to `ceph orch host maintenance` (for example `exit <host> -- --force` to
+bring back a host that is offline). Timeouts are tunable through the `CEPH_HOST_MAINT_*`
+environment variables listed by `ceph-host-maint --help`.
+
+Do not use `ceph osd set-group noup <host>` for this by hand: on a host name
+it sets a CRUSH-node flag that per-OSD `unset-group` cannot clear.
+
+---
+
 ## Groups used by this role
 
 NOTE: When `ceph_cluster_name` is specified below, all hyphens (`-`) will be

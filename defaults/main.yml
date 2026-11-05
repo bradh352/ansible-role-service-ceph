@@ -3,6 +3,10 @@ ceph_default_pool_size: 3
 ceph_default_min_pool_size: 2
 ceph_prometheus: false
 
+# Install /usr/local/sbin/ceph-host-maint (see tasks/cephadm-maint-script.yml
+# and README "Host maintenance").
+ceph_host_maint_script: true
+
 ceph_version: "19.2.3"
 ceph_container_image: "quay.io/ceph/ceph"
 ceph_cephadm_user: "cephadm"
